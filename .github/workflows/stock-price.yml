@@ -23,6 +23,12 @@ jobs:
       - name: 의존성 설치
         run: pip install requests python-dotenv gspread google-auth
 
+      - name: KIS 토큰 캐시 복원
+        uses: actions/cache@v4
+        with:
+          path: token.json
+          key: kis-token
+
       - name: 전일 지수 조회 → 스프레드시트 업데이트
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}

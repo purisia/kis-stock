@@ -21,6 +21,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
 ]
 
+TOKEN_FILE = os.path.join(os.path.dirname(__file__), "token.json")
+
 
 def get_daily_index_chart(
     app_key: str,
@@ -64,6 +66,38 @@ def get_daily_index_chart(
     return response.json().get("output2", [])
 
 
+def get_or_refresh_token(
+    app_key: str,
+    app_secret: str,
+    is_mock: bool = False,
+) -> str:
+    """
+    로컬 token.json에서 저장된 토큰을 확인하고,
+    만료 전이면 재사용, 만료되었으면 새로 발급 후 저장.
+    GitHub Actions Cache로 token.json을 보관하여 토큰 재사용.
+    """
+    # 저장된 토큰 확인
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, "r") as f:
+                data = json.load(f)
+            expiry = datetime.fromisoformat(data["expiry"])
+            if datetime.now() < expiry - timedelta(hours=1):
+                print(f"캐시된 토큰 재사용 (만료: {data['expiry']})")
+                return data["access_token"]
+    except Exception:
+        pass
+
+    # 새 토큰 발급
+    print("새 토큰 발급 중...")
+    access_token = get_access_token(app_key, app_secret, is_mock)
+    expiry = datetime.now() + timedelta(hours=24)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump({"access_token": access_token, "expiry": expiry.isoformat()}, f)
+    print(f"토큰 저장 완료 (만료: {expiry.isoformat()})")
+    return access_token
+
+
 def get_gspread_client() -> gspread.Client:
     """Google Sheets 클라이언트 생성"""
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
@@ -94,10 +128,8 @@ def main():
     print(f"조회 범위: {start_date} ~ {end_date}")
     print()
 
-    # 1. 토큰 발급
-    print("토큰 발급 중...")
-    access_token = get_access_token(app_key, app_secret, is_mock)
-    print("토큰 발급 완료")
+    # 1. 토큰 발급 (캐시된 토큰이 유효하면 재사용)
+    access_token = get_or_refresh_token(app_key, app_secret, is_mock)
 
     # 2. 코스피 일별 데이터 조회
     print("코스피 조회 중...")
