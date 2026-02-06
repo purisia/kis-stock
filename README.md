@@ -1,6 +1,6 @@
 # 한국투자증권 주식 시세 조회
 
-GitHub Actions를 사용하여 주식 시세를 자동으로 조회합니다.
+GitHub Actions를 사용하여 코스피/코스닥 지수를 자동으로 조회하고 Google Sheets에 기록합니다.
 
 ## 설정 방법
 
@@ -12,6 +12,8 @@ Repository > Settings > Secrets and variables > Actions > New repository secret
 |------|-------|
 | `KIS_APP_KEY` | 한국투자증권에서 발급받은 앱 키 |
 | `KIS_APP_SECRET` | 한국투자증권에서 발급받은 앱 시크릿 |
+| `GOOGLE_CREDENTIALS_JSON` | Google 서비스 계정 JSON 키 |
+| `GOOGLE_SPREADSHEET_ID` | Google Spreadsheet ID |
 
 ### 2. Variables 등록 (선택)
 
@@ -19,31 +21,15 @@ Repository > Settings > Secrets and variables > Actions > Variables > New reposi
 
 | Name | Value | 기본값 |
 |------|-------|--------|
-| `KIS_STOCK_CODES` | 조회할 종목코드 (쉼표 구분) | `005930` |
 | `KIS_IS_MOCK` | 모의투자 여부 | `false` |
-
-### 3. 종목 코드 예시
-
-| 코드 | 종목명 |
-|------|--------|
-| 005930 | 삼성전자 |
-| 000660 | SK하이닉스 |
-| 035720 | 카카오 |
-| 005380 | 현대차 |
-| 035420 | NAVER |
 
 ## 실행 스케줄
 
-평일(월-금) 다음 시간에 자동 실행:
-- 09:30 (장 시작 후)
-- 11:00
-- 13:00
-- 14:30
-- 15:20 (장 마감 전)
+매일 오전 8시(KST) 자동 실행 - 전일 코스피/코스닥 지수 수집
 
 ## 수동 실행
 
-Actions > 주식 시세 조회 > Run workflow
+Actions > 코스피/코스닥 지수 수집 > Run workflow
 
 ## 로컬 테스트
 
@@ -53,8 +39,8 @@ cp .env.example .env
 # .env 파일에 실제 키 입력
 
 # 실행
-pip install requests python-dotenv
-python kis_stock_price.py
+pip install requests python-dotenv gspread google-auth
+python update_sheet.py
 ```
 
 ## 한국투자증권 API 키 발급
