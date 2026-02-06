@@ -1,0 +1,33 @@
+name: 코스피/코스닥 지수 수집
+
+on:
+  workflow_dispatch:  # 수동 실행
+
+  schedule:
+    # 매일 오전 8시 (KST) = UTC 23:00 (전일)
+    - cron: '0 23 * * *'
+
+jobs:
+  update-index-to-sheet:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 의존성 설치
+        run: pip install requests python-dotenv gspread google-auth
+
+      - name: 전일 지수 조회 → 스프레드시트 업데이트
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          KIS_IS_MOCK: ${{ vars.KIS_IS_MOCK || 'false' }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GOOGLE_SPREADSHEET_ID: ${{ secrets.GOOGLE_SPREADSHEET_ID }}
+        run: python update_sheet.py
