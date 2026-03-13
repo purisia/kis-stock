@@ -313,10 +313,16 @@ def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
         stock_list = "\n".join(f"- {s['종목코드']} {s['종목명']}" for s in batch)
 
         prompt = f"""아래 한국 주식 종목들이 오늘 급등했습니다.
-각 종목을 웹 검색해서 실제 사업내용과 급등 사유를 1줄로 정리해주세요.
-종목명만으로 추측하지 말고 반드시 검색하세요.
+각 종목을 웹 검색해서 다음을 조사해주세요:
 
-형식 (JSON): {{"종목코드": "사업내용 - 급등사유 요약"}}
+1. 실제 사업내용 (주력 제품/서비스)
+2. 최근 3개월 뉴스/기사 기반 급등 사유
+3. 밸류체인 연결: 이 회사의 제품이 어떤 산업에 쓰이는지 (예: 절삭공구 → 반도체/AI 장비 가공, 전선 → 전력기기)
+
+종목명만으로 추측하지 말고 반드시 최근 기사를 검색하세요.
+특히 "왜 오늘 올랐는지"보다 "어떤 테마/산업과 연결되는지"가 중요합니다.
+
+형식 (JSON): {{"종목코드": "주력사업 | 밸류체인연결 | 최근3개월 핵심 재료/뉴스"}}
 
 종목:
 {stock_list}"""
@@ -352,15 +358,18 @@ def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
 
     # ── 2단계: 검색 결과 기반 테마 통합 분류 (검색 없이) ──
     reasons_text = "\n".join(stock_reasons)
-    classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용과 급등 사유입니다.
+    classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용, 밸류체인, 최근 뉴스입니다.
 이 정보를 바탕으로 테마/섹터별로 분류해주세요.
 
 규칙:
 1. 같은 재료/뉴스로 동반 상승한 종목들을 하나의 테마로 묶기
-2. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
-3. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
-4. 한 종목이 여러 테마에 속할 수 있음
-5. 어울리는 테마 없으면 "기타"로
+2. 밸류체인 연결 고려: 직접 해당 산업이 아니더라도 제품이 해당 산업에 공급되면 포함
+   예: 절삭공구 회사 → 반도체 장비 가공에 사용 → "AI 반도체/반도체 장비" 테마 가능
+   예: 전선/케이블 → 전력망 → "전력기기" 테마 가능
+3. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
+4. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
+5. 한 종목이 여러 테마에 속할 수 있음
+6. 어울리는 테마 없으면 "기타"로
 
 JSON만 출력:
 {{"테마명": ["종목코드1", "종목코드2"]}}
@@ -492,10 +501,6 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
                 entry["테마"].append(t)
         # 상승일 + 등락률 추가
         entry["상승일"][date_str] = s.get("등락률", 0.0)
-        # 최근 90일만 유지
-        if len(entry["상승일"]) > 90:
-            sorted_dates = sorted(entry["상승일"].keys())
-            entry["상승일"] = {d: entry["상승일"][d] for d in sorted_dates[-90:]}
 
     _save_json(stocks_path, stocks_master)
     print(f"  종목 마스터: {stocks_path} ({len(stocks_master)}개)")
@@ -518,7 +523,6 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
         # 활성일 추가
         if date_str not in entry["활성일"]:
             entry["활성일"].append(date_str)
-            entry["활성일"] = entry["활성일"][-90:]
 
     _save_json(themes_path, themes_master)
     print(f"  테마 마스터: {themes_path} ({len(themes_master)}개 테마)")
