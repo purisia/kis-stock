@@ -92,9 +92,14 @@ async function init() {
   themesData = await fetchJson(`${BASE}/data/themes.json`) || {};
   stocksData = await fetchJson(`${BASE}/data/stocks.json`) || {};
 
-  // 모든 날짜 수집
+  // 모든 날짜 수집 (상승일이 dict {날짜: 등락률} 또는 list 형태 대응)
   const allDates = new Set();
-  Object.values(stocksData).forEach(s => s.상승일?.forEach(d => allDates.add(d)));
+  Object.values(stocksData).forEach(s => {
+    if (s.상승일) {
+      if (Array.isArray(s.상승일)) s.상승일.forEach(d => allDates.add(d));
+      else Object.keys(s.상승일).forEach(d => allDates.add(d));
+    }
+  });
   Object.values(themesData).forEach(t => t.활성일?.forEach(d => allDates.add(d)));
 
   const dates = [...allDates].sort().reverse();
@@ -259,9 +264,17 @@ function backToThemeList() {
 // ── 종목 목록 ──
 function renderStockList() {
   const el = document.getElementById('stockList');
+  const getDates = (info) => {
+    if (!info.상승일) return [];
+    if (Array.isArray(info.상승일)) return info.상승일;
+    return Object.keys(info.상승일).sort();
+  };
+
   const sorted = Object.entries(stocksData).sort((a, b) => {
-    const aLast = a[1].상승일?.slice(-1)[0] || '';
-    const bLast = b[1].상승일?.slice(-1)[0] || '';
+    const aDates = getDates(a[1]);
+    const bDates = getDates(b[1]);
+    const aLast = aDates.length ? aDates[aDates.length - 1] : '';
+    const bLast = bDates.length ? bDates[bDates.length - 1] : '';
     return bLast.localeCompare(aLast);
   });
 
@@ -270,12 +283,13 @@ function renderStockList() {
     const themes = (info.테마 || []).map(t =>
       `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
     ).join('');
-    const lastDate = info.상승일?.slice(-1)[0] || '-';
+    const dates = getDates(info);
+    const lastDate = dates.length ? dates[dates.length - 1] : '-';
     html += `<tr>
       <td><span class="stock-link" onclick="showStockDetail('${code}')">${code}</span></td>
       <td><span class="stock-link" onclick="showStockDetail('${code}')">${info.종목명}</span></td>
       <td>${themes}</td>
-      <td>${info.상승일?.length || 0}</td>
+      <td>${dates.length}</td>
       <td>${lastDate}</td>
     </tr>`;
   });
@@ -297,7 +311,8 @@ async function showStockDetail(code) {
   const info = stocksData[code];
   if (!info) { el.innerHTML = '데이터 없음'; return; }
 
-  const dates = (info.상승일 || []).slice().reverse();
+  const rawDates = info.상승일 || {};
+  const dates = (Array.isArray(rawDates) ? rawDates : Object.keys(rawDates)).slice().sort().reverse();
   const themes = (info.테마 || []).map(t =>
     `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
   ).join('');
