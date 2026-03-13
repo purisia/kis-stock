@@ -526,36 +526,6 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
     return daily_path
 
 
-# ── 7. Google Drive 업로드 ────────────────────────────────────────────────────
-
-def upload_to_drive(file_path: str, folder_id: str, creds_json: str) -> str:
-    """파일을 Google Drive 폴더에 업로드."""
-    from google.oauth2.service_account import Credentials
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
-
-    scopes = ["https://www.googleapis.com/auth/drive.file"]
-    creds = Credentials.from_service_account_info(json.loads(creds_json), scopes=scopes)
-    service = build("drive", "v3", credentials=creds)
-
-    filename = os.path.basename(file_path)
-    file_metadata = {"name": filename, "parents": [folder_id]}
-
-    if file_path.endswith(".json"):
-        mime = "application/json"
-    else:
-        mime = "application/octet-stream"
-
-    media = MediaFileUpload(file_path, mimetype=mime, resumable=True)
-    result = service.files().create(
-        body=file_metadata, media_body=media, fields="id"
-    ).execute()
-
-    file_id = result.get("id", "")
-    print(f"  Drive 업로드 완료: {filename} (ID: {file_id})")
-    return file_id
-
-
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -563,8 +533,6 @@ def main():
     app_secret = os.environ.get("KIS_APP_SECRET")
     is_mock = os.environ.get("KIS_IS_MOCK", "false").lower() == "true"
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON", "")
-    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID", "")
 
     if not app_key or not app_secret:
         print("오류: KIS_APP_KEY, KIS_APP_SECRET 환경변수를 설정하세요.")
@@ -657,13 +625,6 @@ def main():
     # 데이터 축적
     print("\n>> 데이터 축적 중...")
     daily_path = accumulate_data(codes_info, theme_map, date_str)
-
-    # Google Drive 업로드
-    if creds_json and folder_id:
-        print("\n>> Google Drive 업로드 중...")
-        upload_to_drive(daily_path, folder_id, creds_json)
-    else:
-        print("\n>> Google Drive 환경변수 미설정 - 업로드 생략")
 
 
 if __name__ == "__main__":
