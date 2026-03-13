@@ -192,9 +192,10 @@ def _gemini_parse_json(resp_json: dict) -> dict:
     return json.loads(text.strip())
 
 
-def classify_themes(stocks: list[dict], api_key: str) -> tuple[dict[str, list[str]], dict[str, str]]:
+def classify_themes(stocks: list[dict], api_key: str, existing_themes: list[str] = None) -> tuple[dict[str, list[str]], dict[str, str]]:
     """Gemini API로 종목 테마 분류.
     2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류.
+    existing_themes: 기존 themes.json의 테마명 목록 (일관성 유지용)
     반환: (테마맵, 종목별 분류사유 dict)
     """
     url = f"{GEMINI_API_URL}?key={api_key}"
@@ -254,6 +255,10 @@ def classify_themes(stocks: list[dict], api_key: str) -> tuple[dict[str, list[st
 
     # 2단계: 검색 결과 기반 테마 통합 분류
     reasons_text = "\n".join(f"- {code} {reason}" for code, reason in stock_reasons.items())
+    existing_list = ""
+    if existing_themes:
+        existing_list = "\n기존 테마 목록 (가능하면 이 이름을 우선 사용):\n" + ", ".join(existing_themes)
+
     classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용, 밸류체인, 최근 뉴스입니다.
 이 정보를 바탕으로 테마/섹터별로 분류해주세요.
 
@@ -263,9 +268,11 @@ def classify_themes(stocks: list[dict], api_key: str) -> tuple[dict[str, list[st
    예: 절삭공구 회사 → 반도체 장비 가공에 사용 → "AI 반도체/반도체 장비" 테마 가능
    예: 전선/케이블 → 전력망 → "전력기기" 테마 가능
 3. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
-4. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
-5. 한 종목이 여러 테마에 속할 수 있음
-6. 어울리는 테마 없으면 "기타"로
+4. 기존 테마에 해당하는 종목은 반드시 기존 테마명을 그대로 사용. 새 테마는 기존에 없는 경우에만 생성
+5. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
+6. 한 종목이 여러 테마에 속할 수 있음
+7. 어울리는 테마 없으면 "기타"로
+{existing_list}
 
 JSON만 출력:
 {{"테마명": ["종목코드1", "종목코드2"]}}
@@ -454,8 +461,13 @@ def main():
     stock_reasons = {}
     if gemini_key:
         print("[3/4] Gemini 테마 분류...")
+        # 기존 테마 목록 로드 (일관된 테마명 유지)
+        themes_path = os.path.join(DATA_DIR, "themes.json")
+        existing_themes = list(_load_json(themes_path).keys())
+        if existing_themes:
+            print(f"    기존 테마 {len(existing_themes)}개 참조")
         try:
-            theme_map, stock_reasons = classify_themes(codes_info, gemini_key)
+            theme_map, stock_reasons = classify_themes(codes_info, gemini_key, existing_themes)
             for theme, codes in theme_map.items():
                 print(f"    {theme}: {len(codes)}개")
         except Exception as e:
