@@ -305,7 +305,7 @@ def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
     headers = {"Content-Type": "application/json"}
 
     # ── 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치) ──
-    batch_size = 10
+    batch_size = 15
     stock_reasons: list[str] = []
 
     for i in range(0, len(stocks), batch_size):
