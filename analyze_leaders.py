@@ -20,7 +20,7 @@ import requests
 load_dotenv()
 
 TOKEN_FILE = os.path.join(os.path.dirname(__file__), "token.json")
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "docs", "data")
 DAILY_DIR = os.path.join(DATA_DIR, "daily")
 
 # ── API 상수 ──────────────────────────────────────────────────────────────────
