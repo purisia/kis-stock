@@ -16,9 +16,9 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
 
-from update_sheet import get_or_refresh_token
-
 load_dotenv()
+
+TOKEN_FILE = os.path.join(os.path.dirname(__file__), "token.json")
 
 # ── API 상수 ──────────────────────────────────────────────────────────────────
 
@@ -57,6 +57,39 @@ def _base_url(is_mock: bool = False) -> str:
     if is_mock:
         return "https://openapivts.koreainvestment.com:29443"
     return "https://openapi.koreainvestment.com:9443"
+
+
+def _get_access_token(app_key: str, app_secret: str, is_mock: bool = False) -> str:
+    """OAuth 토큰 발급."""
+    url = f"{_base_url(is_mock)}/oauth2/tokenP"
+    body = {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
+    resp = requests.post(url, headers={"content-type": "application/json"}, json=body)
+    resp.raise_for_status()
+    data = resp.json()
+    if "access_token" not in data:
+        raise Exception(f"토큰 발급 실패: {data}")
+    return data["access_token"]
+
+
+def get_or_refresh_token(app_key: str, app_secret: str, is_mock: bool = False) -> str:
+    """token.json 캐시 확인 후 재사용 또는 새로 발급."""
+    try:
+        if os.path.exists(TOKEN_FILE):
+            with open(TOKEN_FILE, "r") as f:
+                data = json.load(f)
+            expiry = datetime.fromisoformat(data["expiry"])
+            if datetime.now() < expiry - timedelta(hours=1):
+                print(f"캐시된 토큰 재사용 (만료: {data['expiry']})")
+                return data["access_token"]
+    except Exception:
+        pass
+    print("새 토큰 발급 중...")
+    access_token = _get_access_token(app_key, app_secret, is_mock)
+    expiry = datetime.now() + timedelta(hours=24)
+    with open(TOKEN_FILE, "w") as f:
+        json.dump({"access_token": access_token, "expiry": expiry.isoformat()}, f)
+    print(f"토큰 저장 완료 (만료: {expiry.isoformat()})")
+    return access_token
 
 
 def _kis_headers(
