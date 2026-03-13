@@ -121,41 +121,51 @@ def fetch_fluctuation_top(
     app_key: str,
     app_secret: str,
     is_mock: bool = False,
-    min_advance: float = 0.0,
-    top_n: int = 50,
+    min_advance: float = 10.0,
+    top_n: int = 100,
 ) -> list[dict]:
-    """등락률 순위 전체 조회 -> min_advance% 이상 필터 -> 상위 top_n개."""
+    """등락률 순위 조회. fid_input_cnt_1 offset으로 30개씩 페이징."""
     url = f"{_base_url(is_mock)}{FLUCTUATION_API}"
     all_rows: list[dict] = []
-    tr_cont = ""
+    seen_codes: set[str] = set()
 
-    while True:
-        headers = _kis_headers(access_token, app_key, app_secret, FLUCTUATION_TR_ID, tr_cont)
-        resp = requests.get(url, headers=headers, params=DEF_FLUCT_PARAMS)
+    for offset in range(0, 300, 30):  # 최대 300위까지
+        params = dict(DEF_FLUCT_PARAMS)
+        params["fid_input_cnt_1"] = str(offset)
+
+        headers = _kis_headers(access_token, app_key, app_secret, FLUCTUATION_TR_ID)
+        resp = requests.get(url, headers=headers, params=params)
         resp.raise_for_status()
         data = resp.json()
 
         chunk = data.get("output", [])
         if not chunk:
             break
-        all_rows.extend(chunk)
 
-        tr_cont = resp.headers.get("tr_cont", "")
-        if tr_cont != "M":
-            break
-        tr_cont = "N"
-        time.sleep(0.1)
-
-    result = []
-    for row in all_rows:
-        try:
-            rate = float(row.get("prdy_ctrt", 0))
-        except (ValueError, TypeError):
-            rate = 0.0
-        if rate >= min_advance:
+        # 마지막 종목의 등락률이 min_advance 미만이면 이 페이지까지만
+        last_rate = 0.0
+        new_count = 0
+        for row in chunk:
+            code = row.get("stck_shrn_iscd", "")
+            if code in seen_codes:
+                continue
+            seen_codes.add(code)
+            try:
+                rate = float(row.get("prdy_ctrt", 0))
+            except (ValueError, TypeError):
+                rate = 0.0
             row["_rate"] = rate
-            result.append(row)
+            all_rows.append(row)
+            last_rate = rate
+            new_count += 1
 
+        print(f"    offset={offset}: {new_count}개 (last {last_rate:+.2f}%)")
+
+        if last_rate < min_advance:
+            break
+        time.sleep(0.15)
+
+    result = [r for r in all_rows if r["_rate"] >= min_advance]
     result.sort(key=lambda r: r["_rate"], reverse=True)
     return result[:top_n]
 
@@ -480,7 +490,7 @@ def main():
 
     # 2. 등락률 순위
     print("[2/6] 등락률 순위 조회 (상위 50)...")
-    fluct = fetch_fluctuation_top(access_token, app_key, app_secret, is_mock, top_n=50)
+    fluct = fetch_fluctuation_top(access_token, app_key, app_secret, is_mock)
 
     if not fluct:
         print("조건을 만족하는 종목이 없습니다. (공휴일/장 미개장)")
