@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>대장주 대시보드</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1117; color: #e1e4e8; }
+.container { max-width: 1200px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 1.5rem; margin-bottom: 16px; color: #58a6ff; }
+.tabs { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.tab { padding: 8px 16px; border-radius: 6px; cursor: pointer; border: 1px solid #30363d; background: #161b22; color: #8b949e; font-size: 0.85rem; transition: all 0.15s; }
+.tab:hover { border-color: #58a6ff; color: #c9d1d9; }
+.tab.active { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.view { display: none; }
+.view.active { display: block; }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.card h2 { font-size: 1.1rem; color: #58a6ff; margin-bottom: 8px; cursor: pointer; }
+.card h2:hover { text-decoration: underline; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; margin: 2px; cursor: pointer; }
+.badge-theme { background: #1f3a5f; color: #58a6ff; border: 1px solid #1f6feb; }
+.badge-theme:hover { background: #1f6feb; color: #fff; }
+.badge-date { background: #1a2a1a; color: #3fb950; border: 1px solid #238636; }
+.badge-upper { background: #3d1a1a; color: #f85149; border: 1px solid #da3633; }
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th { text-align: left; padding: 8px; border-bottom: 1px solid #30363d; color: #8b949e; font-weight: 600; }
+td { padding: 8px; border-bottom: 1px solid #21262d; }
+tr:hover { background: #1c2128; }
+.positive { color: #f85149; }
+.negative { color: #58a6ff; }
+.stock-link { color: #58a6ff; cursor: pointer; text-decoration: none; }
+.stock-link:hover { text-decoration: underline; }
+.date-select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 6px 12px; border-radius: 6px; font-size: 0.85rem; }
+.summary { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+.stat { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px 20px; text-align: center; }
+.stat-value { font-size: 1.5rem; font-weight: 700; color: #58a6ff; }
+.stat-label { font-size: 0.75rem; color: #8b949e; margin-top: 4px; }
+.loading { text-align: center; padding: 40px; color: #8b949e; }
+.detail-panel { background: #1c2128; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.back-btn { padding: 6px 12px; border-radius: 6px; cursor: pointer; border: 1px solid #30363d; background: #161b22; color: #8b949e; font-size: 0.85rem; margin-bottom: 12px; }
+.back-btn:hover { border-color: #58a6ff; color: #c9d1d9; }
+.leader-badge { background: #3d2a00; color: #d29922; border: 1px solid #d29922; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 4px; }
+</style>
+</head>
+<body>
+<div class="container">
+  <h1>대장주 대시보드</h1>
+
+  <div class="tabs">
+    <div class="tab active" data-view="daily">일별 현황</div>
+    <div class="tab" data-view="themes">테마별</div>
+    <div class="tab" data-view="stocks">종목별</div>
+  </div>
+
+  <!-- 일별 현황 -->
+  <div id="daily" class="view active">
+    <div style="margin-bottom:12px">
+      <select id="dateSelect" class="date-select"></select>
+    </div>
+    <div id="dailySummary" class="summary"></div>
+    <div id="dailyTable"></div>
+  </div>
+
+  <!-- 테마별 -->
+  <div id="themes" class="view">
+    <div id="themeList"></div>
+    <div id="themeDetail" style="display:none"></div>
+  </div>
+
+  <!-- 종목별 -->
+  <div id="stocks" class="view">
+    <div id="stockList"></div>
+    <div id="stockDetail" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+const BASE = '.';  // GitHub Pages: data/ is copied into the same directory
+
+let themesData = {};
+let stocksData = {};
+let dailyCache = {};
+
+async function fetchJson(url) {
+  const resp = await fetch(url);
+  if (!resp.ok) return null;
+  return resp.json();
+}
+
+async function init() {
+  themesData = await fetchJson(`${BASE}/data/themes.json`) || {};
+  stocksData = await fetchJson(`${BASE}/data/stocks.json`) || {};
+
+  // 모든 날짜 수집
+  const allDates = new Set();
+  Object.values(stocksData).forEach(s => s.상승일?.forEach(d => allDates.add(d)));
+  Object.values(themesData).forEach(t => t.활성일?.forEach(d => allDates.add(d)));
+
+  const dates = [...allDates].sort().reverse();
+  const select = document.getElementById('dateSelect');
+  dates.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d; opt.textContent = d;
+    select.appendChild(opt);
+  });
+
+  if (dates.length > 0) {
+    loadDaily(dates[0]);
+  }
+
+  select.addEventListener('change', () => loadDaily(select.value));
+  renderThemeList();
+  renderStockList();
+}
+
+// ── 탭 전환 ──
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.view).classList.add('active');
+  });
+});
+
+// ── 일별 현황 ──
+async function loadDaily(date) {
+  if (!dailyCache[date]) {
+    dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+  }
+  const data = dailyCache[date];
+  if (!data) {
+    document.getElementById('dailyTable').innerHTML = '<div class="loading">데이터 없음</div>';
+    document.getElementById('dailySummary').innerHTML = '';
+    return;
+  }
+
+  const upperCount = data.filter(s => s.상한가시간 !== '-').length;
+  const themeSet = new Set();
+  data.forEach(s => s.테마?.forEach(t => themeSet.add(t)));
+
+  document.getElementById('dailySummary').innerHTML = `
+    <div class="stat"><div class="stat-value">${data.length}</div><div class="stat-label">분석 종목</div></div>
+    <div class="stat"><div class="stat-value positive">${upperCount}</div><div class="stat-label">상한가</div></div>
+    <div class="stat"><div class="stat-value">${themeSet.size}</div><div class="stat-label">활성 테마</div></div>
+  `;
+
+  let html = `<table>
+    <tr><th>#</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>`;
+  data.forEach((s, i) => {
+    const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
+    const themes = (s.테마 || []).map(t =>
+      `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+    ).join('');
+    html += `<tr>
+      <td>${i+1}</td>
+      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span></td>
+      <td class="positive">+${s.등락률.toFixed(2)}%</td>
+      <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
+      <td>${upper}</td>
+      <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
+      <td>${themes}</td>
+    </tr>`;
+  });
+  html += '</table>';
+  document.getElementById('dailyTable').innerHTML = html;
+}
+
+// ── 테마 목록 ──
+function renderThemeList() {
+  const el = document.getElementById('themeList');
+  const sorted = Object.entries(themesData).sort((a, b) => {
+    const aLast = a[1].활성일?.slice(-1)[0] || '';
+    const bLast = b[1].활성일?.slice(-1)[0] || '';
+    return bLast.localeCompare(aLast);
+  });
+
+  let html = '';
+  sorted.forEach(([theme, info]) => {
+    const lastDate = info.활성일?.slice(-1)[0] || '-';
+    const stockCount = info.종목?.length || 0;
+    const activeDays = info.활성일?.length || 0;
+    html += `<div class="card">
+      <h2 onclick="showThemeDetail('${theme}')">${theme}</h2>
+      <div style="color:#8b949e;font-size:0.85rem;">
+        종목 ${stockCount}개 | 활성 ${activeDays}일 | 최근 ${lastDate}
+      </div>
+      <div style="margin-top:8px">
+        ${(info.활성일 || []).slice(-5).reverse().map(d =>
+          `<span class="badge badge-date">${d}</span>`
+        ).join('')}
+      </div>
+    </div>`;
+  });
+  el.innerHTML = html || '<div class="loading">테마 데이터 없음</div>';
+}
+
+// ── 테마 상세 ──
+async function showThemeDetail(theme) {
+  // 탭 전환
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelector('[data-view="themes"]').classList.add('active');
+  document.getElementById('themes').classList.add('active');
+
+  document.getElementById('themeList').style.display = 'none';
+  const el = document.getElementById('themeDetail');
+  el.style.display = 'block';
+
+  const info = themesData[theme];
+  if (!info) { el.innerHTML = '데이터 없음'; return; }
+
+  const dates = (info.활성일 || []).slice().reverse();
+
+  let html = `<button class="back-btn" onclick="backToThemeList()">목록으로</button>`;
+  html += `<div class="detail-panel">
+    <h2 style="color:#58a6ff;margin-bottom:8px">${theme}</h2>
+    <div style="color:#8b949e;font-size:0.85rem;margin-bottom:8px">
+      종목 ${info.종목?.length || 0}개 | 활성 ${dates.length}일
+    </div>
+    <div>${dates.map(d => `<span class="badge badge-date">${d}</span>`).join('')}</div>
+  </div>`;
+
+  // 날짜별 종목 테이블
+  html += '<table><tr><th>날짜</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th></tr>';
+
+  for (const date of dates.slice(0, 30)) {
+    if (!dailyCache[date]) {
+      dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+    }
+    const dayData = dailyCache[date] || [];
+    const themeCodes = info.종목 || [];
+    const matched = dayData.filter(s => themeCodes.includes(s.종목코드));
+    matched.sort((a, b) => (b.대장주_점수 || 0) - (a.대장주_점수 || 0));
+
+    matched.forEach((s, idx) => {
+      const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
+      const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
+      html += `<tr>
+        <td>${date}</td>
+        <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${leader}</td>
+        <td class="positive">+${s.등락률.toFixed(2)}%</td>
+        <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
+        <td>${upper}</td>
+        <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
+      </tr>`;
+    });
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function backToThemeList() {
+  document.getElementById('themeList').style.display = '';
+  document.getElementById('themeDetail').style.display = 'none';
+}
+
+// ── 종목 목록 ──
+function renderStockList() {
+  const el = document.getElementById('stockList');
+  const sorted = Object.entries(stocksData).sort((a, b) => {
+    const aLast = a[1].상승일?.slice(-1)[0] || '';
+    const bLast = b[1].상승일?.slice(-1)[0] || '';
+    return bLast.localeCompare(aLast);
+  });
+
+  let html = `<table><tr><th>종목코드</th><th>종목명</th><th>테마</th><th>상승일수</th><th>최근</th></tr>`;
+  sorted.forEach(([code, info]) => {
+    const themes = (info.테마 || []).map(t =>
+      `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+    ).join('');
+    const lastDate = info.상승일?.slice(-1)[0] || '-';
+    html += `<tr>
+      <td><span class="stock-link" onclick="showStockDetail('${code}')">${code}</span></td>
+      <td><span class="stock-link" onclick="showStockDetail('${code}')">${info.종목명}</span></td>
+      <td>${themes}</td>
+      <td>${info.상승일?.length || 0}</td>
+      <td>${lastDate}</td>
+    </tr>`;
+  });
+  html += '</table>';
+  el.innerHTML = html || '<div class="loading">종목 데이터 없음</div>';
+}
+
+// ── 종목 상세 ──
+async function showStockDetail(code) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelector('[data-view="stocks"]').classList.add('active');
+  document.getElementById('stocks').classList.add('active');
+
+  document.getElementById('stockList').style.display = 'none';
+  const el = document.getElementById('stockDetail');
+  el.style.display = 'block';
+
+  const info = stocksData[code];
+  if (!info) { el.innerHTML = '데이터 없음'; return; }
+
+  const dates = (info.상승일 || []).slice().reverse();
+  const themes = (info.테마 || []).map(t =>
+    `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+  ).join('');
+
+  let html = `<button class="back-btn" onclick="backToStockList()">목록으로</button>`;
+  html += `<div class="detail-panel">
+    <h2 style="color:#58a6ff;margin-bottom:8px">${code} ${info.종목명}</h2>
+    <div style="margin-bottom:8px">${themes}</div>
+    <div style="color:#8b949e;font-size:0.85rem">상승 ${dates.length}일</div>
+  </div>`;
+
+  html += '<table><tr><th>날짜</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>';
+
+  for (const date of dates.slice(0, 30)) {
+    if (!dailyCache[date]) {
+      dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+    }
+    const dayData = dailyCache[date] || [];
+    const entry = dayData.find(s => s.종목코드 === code);
+    if (!entry) continue;
+
+    const upper = entry.상한가시간 !== '-' ? `<span class="badge badge-upper">${entry.상한가시간}</span>` : '-';
+    const dayThemes = (entry.테마 || []).map(t =>
+      `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+    ).join('');
+
+    html += `<tr>
+      <td>${date}</td>
+      <td class="positive">+${entry.등락률.toFixed(2)}%</td>
+      <td>${(entry.거래대금_백만 || 0).toLocaleString()}</td>
+      <td>${upper}</td>
+      <td>${(entry.대장주_점수 || 0).toFixed(1)}</td>
+      <td>${dayThemes}</td>
+    </tr>`;
+  }
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+function backToStockList() {
+  document.getElementById('stockList').style.display = '';
+  document.getElementById('stockDetail').style.display = 'none';
+}
+
+init();
+</script>
+</body>
+</html>

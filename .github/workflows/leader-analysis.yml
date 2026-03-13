@@ -7,6 +7,11 @@ on:
     # 평일 16:00 KST = UTC 07:00 (월~금)
     - cron: '0 7 * * 1-5'
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
 jobs:
   analyze-leaders:
     runs-on: ubuntu-latest
@@ -34,14 +39,46 @@ jobs:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_IS_MOCK: ${{ vars.KIS_IS_MOCK || 'false' }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           GOOGLE_DRIVE_FOLDER_ID: ${{ vars.GOOGLE_DRIVE_FOLDER_ID }}
         run: python analyze_leaders.py
 
-      - name: 결과 아티팩트 업로드
-        if: always()
-        uses: actions/upload-artifact@v4
+      - name: 데이터 커밋
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "데이터 업데이트 $(date +%Y-%m-%d)"
+          git push
+
+  deploy-pages:
+    needs: analyze-leaders
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
         with:
-          name: leader-analysis-${{ github.run_number }}
-          path: output/
-          retention-days: 30
+          ref: main
+
+      - name: Git pull (최신 데이터 반영)
+        run: git pull origin main
+
+      - name: Pages 사이트 빌드
+        run: |
+          mkdir -p _site
+          cp -r docs/* _site/
+          cp -r data/ _site/data/
+
+      - name: Pages 아티팩트 준비
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site/
+
+      - name: GitHub Pages 배포
+        id: deployment
+        uses: actions/deploy-pages@v4
