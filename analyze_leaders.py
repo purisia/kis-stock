@@ -51,7 +51,7 @@ DEF_FLUCT_PARAMS = {
     "fid_rsfl_rate2": "",
 }
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent"
 
 
 # ── 공통 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -299,14 +299,17 @@ def _gemini_parse_json(resp_json: dict) -> dict:
     return json.loads(text.strip())
 
 
-def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
-    """Gemini API로 종목 테마 분류. 2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류."""
+def classify_themes(stocks: list[dict], api_key: str) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Gemini API로 종목 테마 분류.
+    2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류.
+    반환: (테마맵, 종목별 분류사유 dict)
+    """
     url = f"{GEMINI_API_URL}?key={api_key}"
     headers = {"Content-Type": "application/json"}
 
     # ── 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치) ──
     batch_size = 15
-    stock_reasons: list[str] = []
+    stock_reasons: dict[str, str] = {}  # {종목코드: 사유}
 
     for i in range(0, len(stocks), batch_size):
         batch = stocks[i:i + batch_size]
@@ -338,8 +341,7 @@ def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
             if resp.status_code == 200:
                 try:
                     reasons = _gemini_parse_json(resp.json())
-                    for code, reason in reasons.items():
-                        stock_reasons.append(f"- {code} {reason}")
+                    stock_reasons.update(reasons)
                     break
                 except (json.JSONDecodeError, KeyError, IndexError) as e:
                     print(f"    검색 배치 {i//batch_size+1} 파싱 실패: {e}")
@@ -352,12 +354,12 @@ def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
             time.sleep(15)
 
     if not stock_reasons:
-        return {}
+        return {}, {}
 
     print(f"    검색 완료: {len(stock_reasons)}개 종목 사유 파악")
 
     # ── 2단계: 검색 결과 기반 테마 통합 분류 (검색 없이) ──
-    reasons_text = "\n".join(stock_reasons)
+    reasons_text = "\n".join(f"- {code} {reason}" for code, reason in stock_reasons.items())
     classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용, 밸류체인, 최근 뉴스입니다.
 이 정보를 바탕으로 테마/섹터별로 분류해주세요.
 
@@ -387,7 +389,8 @@ JSON만 출력:
         resp = requests.post(url, headers=headers, json=body)
         if resp.status_code == 200:
             try:
-                return _gemini_parse_json(resp.json())
+                theme_map = _gemini_parse_json(resp.json())
+                return theme_map, stock_reasons
             except (json.JSONDecodeError, KeyError, IndexError) as e:
                 print(f"    분류 파싱 실패: {e}")
         else:
@@ -395,7 +398,7 @@ JSON만 출력:
             print(f"    분류 HTTP {resp.status_code}, {wait}초 대기...")
             time.sleep(wait)
 
-    return {}
+    return {}, stock_reasons
 
 
 # ── 5. 점수 산출 ──────────────────────────────────────────────────────────────
@@ -447,8 +450,10 @@ def _save_json(path: str, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
+def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str, stock_reasons: dict = None):
     """일별 데이터 저장 + stocks.json, themes.json 마스터 업데이트."""
+    if stock_reasons is None:
+        stock_reasons = {}
     os.makedirs(DAILY_DIR, exist_ok=True)
 
     # 종목별 테마 역매핑
@@ -472,6 +477,7 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
             "상한가시간": s.get("상한가시간", "-"),
             "대장주_점수": s.get("대장주_점수", 0),
             "테마": stock_themes.get(s["종목코드"], []),
+            "분류사유": stock_reasons.get(s["종목코드"], ""),
         })
 
     daily_path = os.path.join(DAILY_DIR, f"{date_str}.json")
@@ -597,10 +603,11 @@ def main():
 
     # 5. Gemini 테마 분류
     theme_map = {}
+    stock_reasons = {}
     if gemini_key:
         print("[5/6] Gemini 테마 분류...")
         try:
-            theme_map = classify_themes(codes_info, gemini_key)
+            theme_map, stock_reasons = classify_themes(codes_info, gemini_key)
             for theme, codes in theme_map.items():
                 print(f"    {theme}: {len(codes)}개")
         except Exception as e:
@@ -628,7 +635,7 @@ def main():
 
     # 데이터 축적
     print("\n>> 데이터 축적 중...")
-    daily_path = accumulate_data(codes_info, theme_map, date_str)
+    daily_path = accumulate_data(codes_info, theme_map, date_str, stock_reasons)
 
 
 if __name__ == "__main__":

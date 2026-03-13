@@ -166,7 +166,7 @@ async function loadDaily(date) {
     ).join('');
     html += `<tr>
       <td>${i+1}</td>
-      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${alphaLink(s.종목코드)}</td>
+      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')" title="${(s.분류사유 || '').replace(/"/g, '&quot;')}">${s.종목코드} ${s.종목명}</span>${alphaLink(s.종목코드)}</td>
       <td class="positive">+${s.등락률.toFixed(2)}%</td>
       <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
       <td>${upper}</td>
@@ -330,7 +330,7 @@ async function showStockDetail(code) {
     <div style="color:#8b949e;font-size:0.85rem">상승 ${dates.length}일</div>
   </div>`;
 
-  html += '<table><tr><th>날짜</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>';
+  html += '<table><tr><th>날짜</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th><th>분류사유</th></tr>';
 
   for (const date of dates.slice(0, 30)) {
     if (!dailyCache[date]) {
@@ -352,6 +352,7 @@ async function showStockDetail(code) {
       <td>${upper}</td>
       <td>${(entry.대장주_점수 || 0).toFixed(1)}</td>
       <td>${dayThemes}</td>
+      <td style="font-size:0.75rem;color:#8b949e;max-width:300px">${entry.분류사유 || ''}</td>
     </tr>`;
   }
   html += '</table>';
