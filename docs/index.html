@@ -75,6 +75,7 @@ tr:hover { background: #1c2128; }
 
   <div class="tabs">
     <div class="tab active" data-view="daily">일별 현황</div>
+    <div class="tab" data-view="dailyThemes">일별 테마</div>
     <div class="tab" data-view="themes">테마별</div>
     <div class="tab" data-view="stocks">종목별</div>
   </div>
@@ -86,6 +87,15 @@ tr:hover { background: #1c2128; }
     </div>
     <div id="dailySummary" class="summary"></div>
     <div id="dailyTable"></div>
+  </div>
+
+  <!-- 일별 테마 -->
+  <div id="dailyThemes" class="view">
+    <div style="margin-bottom:12px">
+      <select id="dtDateSelect" class="date-select"></select>
+    </div>
+    <div id="dtSummary" class="summary"></div>
+    <div id="dtContent"></div>
   </div>
 
   <!-- 테마별 -->
@@ -133,6 +143,8 @@ function applyState(state) {
     switchTab('daily');
     backToThemeList(true);
     backToStockList(true);
+  } else if (state.page === 'dailyThemes') {
+    switchTab('dailyThemes');
   } else if (state.page === 'themes') {
     switchTab('themes');
     backToThemeList(true);
@@ -181,7 +193,19 @@ async function init() {
     select.appendChild(opt);
   });
 
-  if (dates.length > 0) loadDaily(dates[0]);
+  // 일별 테마 날짜 셀렉트도 동일하게 채우기
+  const dtSelect = document.getElementById('dtDateSelect');
+  dates.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d; opt.textContent = d;
+    dtSelect.appendChild(opt);
+  });
+  dtSelect.addEventListener('change', () => loadDailyThemes(dtSelect.value));
+
+  if (dates.length > 0) {
+    loadDaily(dates[0]);
+    loadDailyThemes(dates[0]);
+  }
 
   select.addEventListener('change', () => loadDaily(select.value));
   renderThemeList();
@@ -273,6 +297,102 @@ async function loadDaily(date) {
   cards += '</div>';
 
   document.getElementById('dailyTable').innerHTML = tbl + cards;
+}
+
+// ── 일별 테마 ──
+async function loadDailyThemes(date) {
+  if (!dailyCache[date]) {
+    dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+  }
+  const data = dailyCache[date];
+  if (!data) {
+    document.getElementById('dtContent').innerHTML = '<div class="loading">데이터 없음</div>';
+    document.getElementById('dtSummary').innerHTML = '';
+    return;
+  }
+
+  // 테마별로 종목 그룹핑
+  const themeGroups = {};
+  data.forEach(s => {
+    const themes = s.테마 && s.테마.length > 0 ? s.테마 : ['미분류'];
+    themes.forEach(t => {
+      if (!themeGroups[t]) themeGroups[t] = [];
+      themeGroups[t].push(s);
+    });
+  });
+
+  // 테마별 총 거래대금 기준 정렬 (영향력 순)
+  const sorted = Object.entries(themeGroups).sort((a, b) => {
+    const aSum = a[1].reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    const bSum = b[1].reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    return bSum - aSum;
+  });
+
+  const themeCount = Object.keys(themeGroups).length;
+  const upperCount = data.filter(s => s.상한가시간 !== '-').length;
+  document.getElementById('dtSummary').innerHTML = `
+    <div class="stat"><div class="stat-value">${themeCount}</div><div class="stat-label">활성 테마</div></div>
+    <div class="stat"><div class="stat-value">${data.length}</div><div class="stat-label">종목</div></div>
+    <div class="stat"><div class="stat-value positive">${upperCount}</div><div class="stat-label">상한가</div></div>
+  `;
+
+  let html = '';
+  sorted.forEach(([theme, stocks]) => {
+    const totalAmt = stocks.reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    const upperInTheme = stocks.filter(s => s.상한가시간 !== '-').length;
+    const avgRate = (stocks.reduce((s, x) => s + x.등락률, 0) / stocks.length).toFixed(1);
+
+    // 카드 헤더
+    html += `<div class="card">
+      <h2 onclick="showThemeDetail('${theme}')">${theme}</h2>
+      <div style="color:#8b949e;font-size:0.85rem;margin-bottom:8px">
+        종목 ${stocks.length}개 | 평균 +${avgRate}% | 거래대금 ${fmtPrice(totalAmt)}백만${upperInTheme > 0 ? ` | <span class="positive">상한가 ${upperInTheme}</span>` : ''}
+      </div>`;
+
+    // 데스크톱 테이블
+    html += `<div class="d-table"><table>
+      <tr><th>종목</th><th>시가</th><th>고가</th><th>종가</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th></tr>`;
+    stocks.sort((a, b) => (b.대장주_점수 || 0) - (a.대장주_점수 || 0));
+    stocks.forEach((s, idx) => {
+      const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
+      const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
+      html += `<tr>
+        <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목명}</span>${leader}${alphaLink(s.종목코드)}</td>
+        <td>${fmtPrice(s.시가)}</td>
+        <td>${fmtPrice(s.고가)}</td>
+        <td>${fmtPrice(s.종가)}</td>
+        <td class="positive">+${s.등락률.toFixed(2)}%</td>
+        <td>${fmtPrice(s.거래대금_백만)}</td>
+        <td>${upper}</td>
+        <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
+      </tr>`;
+    });
+    html += '</table></div>';
+
+    // 모바일 카드
+    html += '<div class="m-cards">';
+    stocks.forEach((s, idx) => {
+      const upperM = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '';
+      const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
+      html += `<div class="m-card" onclick="showStockDetail('${s.종목코드}')">
+        <div class="m-card-row1">
+          <div><span class="m-card-name">${s.종목명}</span>${leader}${alphaLink(s.종목코드)}${upperM}</div>
+          <div class="m-card-rate positive">+${s.등락률.toFixed(2)}%</div>
+        </div>
+        <div class="m-card-row2">
+          <span class="m-card-price">시${fmtPrice(s.시가)}</span>
+          <span class="m-card-price">고${fmtPrice(s.고가)}</span>
+          <span class="m-card-price">종${fmtPrice(s.종가)}</span>
+          <span>거래대금 ${fmtPrice(s.거래대금_백만)}백만</span>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+
+    html += '</div>'; // card 닫기
+  });
+
+  document.getElementById('dtContent').innerHTML = html;
 }
 
 // ── 테마 목록 ──
