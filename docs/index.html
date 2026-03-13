@@ -41,6 +41,8 @@ tr:hover { background: #1c2128; }
 .back-btn { padding: 6px 12px; border-radius: 6px; cursor: pointer; border: 1px solid #30363d; background: #161b22; color: #8b949e; font-size: 0.85rem; margin-bottom: 12px; }
 .back-btn:hover { border-color: #58a6ff; color: #c9d1d9; }
 .leader-badge { background: #3d2a00; color: #d29922; border: 1px solid #d29922; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 4px; }
+.alpha-btn { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 4px; background: #1a2d1a; color: #3fb950; border: 1px solid #238636; text-decoration: none; vertical-align: middle; cursor: pointer; }
+.alpha-btn:hover { background: #238636; color: #fff; }
 </style>
 </head>
 <body>
@@ -77,6 +79,10 @@ tr:hover { background: #1c2128; }
 
 <script>
 const BASE = '.';  // GitHub Pages: data/ is copied into the same directory
+
+function alphaLink(code) {
+  return `<a class="alpha-btn" href="https://m.alphasquare.co.kr/home/indicator-analysis?code=${code}" target="_blank" rel="noopener" onclick="event.stopPropagation()">&#945;</a>`;
+}
 
 let themesData = {};
 let stocksData = {};
@@ -160,7 +166,7 @@ async function loadDaily(date) {
     ).join('');
     html += `<tr>
       <td>${i+1}</td>
-      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span></td>
+      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${alphaLink(s.종목코드)}</td>
       <td class="positive">+${s.등락률.toFixed(2)}%</td>
       <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
       <td>${upper}</td>
@@ -244,7 +250,7 @@ async function showThemeDetail(theme) {
       const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
       html += `<tr>
         <td>${date}</td>
-        <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${leader}</td>
+        <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${leader}${alphaLink(s.종목코드)}</td>
         <td class="positive">+${s.등락률.toFixed(2)}%</td>
         <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
         <td>${upper}</td>
@@ -286,7 +292,7 @@ function renderStockList() {
     const dates = getDates(info);
     const lastDate = dates.length ? dates[dates.length - 1] : '-';
     html += `<tr>
-      <td><span class="stock-link" onclick="showStockDetail('${code}')">${code}</span></td>
+      <td><span class="stock-link" onclick="showStockDetail('${code}')">${code}</span>${alphaLink(code)}</td>
       <td><span class="stock-link" onclick="showStockDetail('${code}')">${info.종목명}</span></td>
       <td>${themes}</td>
       <td>${dates.length}</td>
@@ -319,7 +325,7 @@ async function showStockDetail(code) {
 
   let html = `<button class="back-btn" onclick="backToStockList()">목록으로</button>`;
   html += `<div class="detail-panel">
-    <h2 style="color:#58a6ff;margin-bottom:8px">${code} ${info.종목명}</h2>
+    <h2 style="color:#58a6ff;margin-bottom:8px">${code} ${info.종목명} ${alphaLink(code)}</h2>
     <div style="margin-bottom:8px">${themes}</div>
     <div style="color:#8b949e;font-size:0.85rem">상승 ${dates.length}일</div>
   </div>`;
