@@ -124,46 +124,71 @@ def fetch_fluctuation_top(
     min_advance: float = 10.0,
     top_n: int = 100,
 ) -> list[dict]:
-    """등락률 순위 조회. fid_input_cnt_1 offset으로 30개씩 페이징."""
+    """등락률 순위 조회. 여러 마켓/분류 조합으로 조회 후 병합 (API 누락 방지)."""
     url = f"{_base_url(is_mock)}{FLUCTUATION_API}"
     all_rows: list[dict] = []
     seen_codes: set[str] = set()
 
-    for offset in range(0, 300, 30):  # 최대 300위까지
-        params = dict(DEF_FLUCT_PARAMS)
-        params["fid_input_cnt_1"] = str(offset)
+    # (라벨, 시장코드, 종목필터, 분류코드)
+    # 전체(J,0000)는 정렬 정상 → 등락률 기반 조기종료
+    # 코스피/코스닥/NX 개별 조회는 정렬이 깨짐 → 새 종목 없을 때까지 계속
+    queries = [
+        ("J-전체",  "J",  "0000", "0"),
+        ("J-전체-우선주", "J", "0000", "2"),
+        ("J-코스피", "J",  "0001", "0"),
+        ("J-코스닥", "J",  "1001", "0"),
+        ("NX-전체", "NX", "0000", "0"),
+        ("NX-코스피", "NX", "0001", "0"),
+        ("NX-코스닥", "NX", "1001", "0"),
+    ]
 
-        headers = _kis_headers(access_token, app_key, app_secret, FLUCTUATION_TR_ID)
-        resp = requests.get(url, headers=headers, params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    for label, mrkt, iscd, div_cls in queries:
+        mkt_new = 0
+        for offset in range(0, 300, 30):
+            params = dict(DEF_FLUCT_PARAMS)
+            params["fid_cond_mrkt_div_code"] = mrkt
+            params["fid_input_iscd"] = iscd
+            params["fid_input_cnt_1"] = str(offset)
+            params["fid_div_cls_code"] = div_cls
 
-        chunk = data.get("output", [])
-        if not chunk:
-            break
+            headers = _kis_headers(access_token, app_key, app_secret, FLUCTUATION_TR_ID)
+            resp = requests.get(url, headers=headers, params=params)
+            resp.raise_for_status()
+            data = resp.json()
 
-        # 마지막 종목의 등락률이 min_advance 미만이면 이 페이지까지만
-        last_rate = 0.0
-        new_count = 0
-        for row in chunk:
-            code = row.get("stck_shrn_iscd", "")
-            if code in seen_codes:
-                continue
-            seen_codes.add(code)
-            try:
-                rate = float(row.get("prdy_ctrt", 0))
-            except (ValueError, TypeError):
-                rate = 0.0
-            row["_rate"] = rate
-            all_rows.append(row)
-            last_rate = rate
-            new_count += 1
+            chunk = data.get("output", [])
+            if not chunk:
+                break
 
-        print(f"    offset={offset}: {new_count}개 (last {last_rate:+.2f}%)")
+            last_rate = 0.0
+            new_count = 0
+            for row in chunk:
+                code = row.get("stck_shrn_iscd", "")
+                if code in seen_codes:
+                    continue
+                seen_codes.add(code)
+                try:
+                    rate = float(row.get("prdy_ctrt", 0))
+                except (ValueError, TypeError):
+                    rate = 0.0
+                row["_rate"] = rate
+                all_rows.append(row)
+                last_rate = rate
+                new_count += 1
 
-        if last_rate < min_advance:
-            break
-        time.sleep(0.15)
+            mkt_new += new_count
+
+            # J-전체 보통주는 정렬되므로 등락률 기준 조기종료
+            if mrkt == "J" and iscd == "0000" and div_cls == "0":
+                if last_rate < min_advance:
+                    break
+            else:
+                if new_count == 0:
+                    break
+            time.sleep(0.15)
+
+        if mkt_new > 0:
+            print(f"    {label}: {mkt_new}개 수집")
 
     result = [r for r in all_rows if r["_rate"] >= min_advance]
     result.sort(key=lambda r: r["_rate"], reverse=True)
