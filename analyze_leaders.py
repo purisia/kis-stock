@@ -51,6 +51,9 @@ def fetch_rising_stocks(min_rate: float = 10.0) -> list[dict]:
         results.append({
             "종목코드": row["Code"],
             "종목명": row["Name"],
+            "시가": int(row["Open"]),
+            "고가": int(row["High"]),
+            "종가": int(row["Close"]),
             "등락률": round(row["ChagesRatio"], 2),
             "거래대금_백만": int(row["Amount"] / 1e6),
             "시가총액_억": int(row["Marcap"] / 1e8),
@@ -352,6 +355,9 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str, stock_re
         daily_data.append({
             "종목코드": s["종목코드"],
             "종목명": s["종목명"],
+            "시가": s.get("시가", 0),
+            "고가": s.get("고가", 0),
+            "종가": s.get("종가", 0),
             "등락률": s["등락률"],
             "거래대금_백만": s.get("거래대금_백만", 0),
             "시가총액_억": s.get("시가총액_억", 0),

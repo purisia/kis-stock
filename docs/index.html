@@ -81,7 +81,7 @@ tr:hover { background: #1c2128; }
 const BASE = '.';  // GitHub Pages: data/ is copied into the same directory
 
 function alphaLink(code) {
-  return `<a class="alpha-btn" href="https://m.alphasquare.co.kr/home/indicator-analysis?code=${code}" target="_blank" rel="noopener" onclick="event.stopPropagation()">&#945;</a>`;
+  return `<a class="alpha-btn" href="https://alphasquare.co.kr/home/stock-information?code=${code}" target="_blank" rel="noopener" onclick="event.stopPropagation()">&#945;</a>`;
 }
 
 let themesData = {};
@@ -158,7 +158,7 @@ async function loadDaily(date) {
   `;
 
   let html = `<table>
-    <tr><th>#</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>`;
+    <tr><th>#</th><th>종목</th><th>시가</th><th>고가</th><th>종가</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>`;
   data.forEach((s, i) => {
     const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
     const themes = (s.테마 || []).map(t =>
@@ -167,6 +167,9 @@ async function loadDaily(date) {
     html += `<tr>
       <td>${i+1}</td>
       <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')" title="${(s.분류사유 || '').replace(/"/g, '&quot;')}">${s.종목코드} ${s.종목명}</span>${alphaLink(s.종목코드)}</td>
+      <td>${(s.시가 || 0).toLocaleString()}</td>
+      <td>${(s.고가 || 0).toLocaleString()}</td>
+      <td>${(s.종가 || 0).toLocaleString()}</td>
       <td class="positive">+${s.등락률.toFixed(2)}%</td>
       <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
       <td>${upper}</td>
