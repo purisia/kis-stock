@@ -33,3 +33,6 @@ nul
 backfill_sheet.py
 stock_code/
 token.json
+
+# 분석 출력
+output/
