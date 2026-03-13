@@ -51,7 +51,7 @@ DEF_FLUCT_PARAMS = {
     "fid_rsfl_rate2": "",
 }
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 
 # ── 공통 헬퍼 ─────────────────────────────────────────────────────────────────
@@ -284,49 +284,109 @@ def fetch_upper_limit_time(
 
 # ── 4. Gemini 테마 분류 ───────────────────────────────────────────────────────
 
+def _gemini_parse_json(resp_json: dict) -> dict:
+    """Gemini 응답에서 JSON 파싱. 여러 parts, ```json``` 래핑 처리."""
+    parts = resp_json["candidates"][0]["content"]["parts"]
+    text = ""
+    for part in parts:
+        if "text" in part:
+            text += part["text"]
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1]
+    if text.endswith("```"):
+        text = text.rsplit("```", 1)[0]
+    return json.loads(text.strip())
+
+
 def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
-    """Gemini API로 종목들을 테마/섹터별로 분류. {테마명: [종목코드, ...]} 반환."""
-    stock_list = "\n".join(
-        f"- {s['종목코드']} {s['종목명']}" for s in stocks
-    )
+    """Gemini API로 종목 테마 분류. 2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류."""
+    url = f"{GEMINI_API_URL}?key={api_key}"
+    headers = {"Content-Type": "application/json"}
 
-    prompt = f"""아래는 오늘 한국 주식시장에서 급등한 종목 리스트입니다.
-이 종목들을 테마/섹터별로 분류해주세요.
+    # ── 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치) ──
+    batch_size = 15
+    stock_reasons: list[str] = []
 
-규칙:
-- 하나의 종목이 여러 테마에 속할 수 있습니다
-- 테마명은 간결하게 (예: "AI", "2차전지", "반도체", "바이오", "방산", "로봇")
-- 관련성이 명확한 것만 분류하고, 애매하면 "기타"로
-- 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요.
+    for i in range(0, len(stocks), batch_size):
+        batch = stocks[i:i + batch_size]
+        stock_list = "\n".join(f"- {s['종목코드']} {s['종목명']}" for s in batch)
 
-응답 형식:
-{{"테마명": ["종목코드1", "종목코드2"], "테마명2": ["종목코드3"]}}
+        prompt = f"""아래 한국 주식 종목들이 오늘 급등했습니다.
+각 종목을 웹 검색해서 실제 사업내용과 급등 사유를 1줄로 정리해주세요.
+종목명만으로 추측하지 말고 반드시 검색하세요.
 
-종목 리스트:
+형식 (JSON): {{"종목코드": "사업내용 - 급등사유 요약"}}
+
+종목:
 {stock_list}"""
 
+        body = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.1},
+        }
+
+        for attempt in range(3):
+            resp = requests.post(url, headers=headers, json=body)
+            if resp.status_code == 200:
+                try:
+                    reasons = _gemini_parse_json(resp.json())
+                    for code, reason in reasons.items():
+                        stock_reasons.append(f"- {code} {reason}")
+                    break
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    print(f"    검색 배치 {i//batch_size+1} 파싱 실패: {e}")
+            else:
+                wait = 15 * (attempt + 1)
+                print(f"    검색 배치 {i//batch_size+1} HTTP {resp.status_code}, {wait}초 대기...")
+                time.sleep(wait)
+
+        if i + batch_size < len(stocks):
+            time.sleep(8)
+
+    if not stock_reasons:
+        return {}
+
+    print(f"    검색 완료: {len(stock_reasons)}개 종목 사유 파악")
+
+    # ── 2단계: 검색 결과 기반 테마 통합 분류 (검색 없이) ──
+    reasons_text = "\n".join(stock_reasons)
+    classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용과 급등 사유입니다.
+이 정보를 바탕으로 테마/섹터별로 분류해주세요.
+
+규칙:
+1. 같은 재료/뉴스로 동반 상승한 종목들을 하나의 테마로 묶기
+2. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
+3. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
+4. 한 종목이 여러 테마에 속할 수 있음
+5. 어울리는 테마 없으면 "기타"로
+
+JSON만 출력:
+{{"테마명": ["종목코드1", "종목코드2"]}}
+
+종목 정보:
+{reasons_text}"""
+
     body = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [{"parts": [{"text": classify_prompt}]}],
         "generationConfig": {"temperature": 0.1},
     }
 
-    resp = requests.post(
-        f"{GEMINI_API_URL}?key={api_key}",
-        headers={"Content-Type": "application/json"},
-        json=body,
-    )
-    resp.raise_for_status()
+    time.sleep(5)
+    for attempt in range(3):
+        resp = requests.post(url, headers=headers, json=body)
+        if resp.status_code == 200:
+            try:
+                return _gemini_parse_json(resp.json())
+            except (json.JSONDecodeError, KeyError, IndexError) as e:
+                print(f"    분류 파싱 실패: {e}")
+        else:
+            wait = 15 * (attempt + 1)
+            print(f"    분류 HTTP {resp.status_code}, {wait}초 대기...")
+            time.sleep(wait)
 
-    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-    # Gemini가 ```json ... ``` 으로 감쌀 수 있으므로 정리
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.split("\n", 1)[1]  # 첫 줄 제거
-    if text.endswith("```"):
-        text = text.rsplit("```", 1)[0]
-    text = text.strip()
-
-    return json.loads(text)
+    return {}
 
 
 # ── 5. 점수 산출 ──────────────────────────────────────────────────────────────
@@ -419,18 +479,23 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
             stocks_master[code] = {
                 "종목명": s["종목명"],
                 "테마": [],
-                "상승일": [],
+                "상승일": {},
             }
         entry = stocks_master[code]
         entry["종목명"] = s["종목명"]
+        # 기존 리스트 형식 → 딕셔너리 마이그레이션
+        if isinstance(entry.get("상승일"), list):
+            entry["상승일"] = {d: 0.0 for d in entry["상승일"]}
         # 테마 병합
         for t in stock_themes.get(code, []):
             if t not in entry["테마"]:
                 entry["테마"].append(t)
-        # 상승일 추가
-        if date_str not in entry["상승일"]:
-            entry["상승일"].append(date_str)
-            entry["상승일"] = entry["상승일"][-90:]  # 최근 90일만 유지
+        # 상승일 + 등락률 추가
+        entry["상승일"][date_str] = s.get("등락률", 0.0)
+        # 최근 90일만 유지
+        if len(entry["상승일"]) > 90:
+            sorted_dates = sorted(entry["상승일"].keys())
+            entry["상승일"] = {d: entry["상승일"][d] for d in sorted_dates[-90:]}
 
     _save_json(stocks_path, stocks_master)
     print(f"  종목 마스터: {stocks_path} ({len(stocks_master)}개)")
