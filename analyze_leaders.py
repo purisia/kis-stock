@@ -254,13 +254,24 @@ def classify_themes(stocks: list[dict], api_key: str, existing_themes: list[str]
     print(f"    검색 완료: {len(stock_reasons)}개 종목 사유 파악")
 
     # 2단계: 검색 결과 기반 테마 통합 분류
-    reasons_text = "\n".join(f"- {code} {reason}" for code, reason in stock_reasons.items())
+    # 종목코드 + 종목명 + 사유를 함께 전달
+    code_name_map = {s["종목코드"]: s["종목명"] for s in stocks}
+    reasons_lines = []
+    for code, reason in stock_reasons.items():
+        name = code_name_map.get(code, code)
+        reasons_lines.append(f"- {code} {name}: {reason}")
+    reasons_text = "\n".join(reasons_lines)
+
     existing_list = ""
     if existing_themes:
         existing_list = "\n기존 테마 목록 (가능하면 이 이름을 우선 사용):\n" + ", ".join(existing_themes)
 
     classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용, 밸류체인, 최근 뉴스입니다.
 이 정보를 바탕으로 테마/섹터별로 분류해주세요.
+
+**핵심 원칙**: 반드시 각 종목의 "실제 사업내용"과 "밸류체인 연결"을 읽고 분류하세요.
+종목명(회사명)에 "약품", "바이오", "건설" 등이 들어있어도 실제 사업이 다르면 종목명을 무시하세요.
+예: "국전약품" → 종목명에 약품이 있지만 실제는 반도체소재/HBM소재 기업 → "반도체/디스플레이"
 
 규칙:
 1. 같은 재료/뉴스로 동반 상승한 종목들을 하나의 테마로 묶기
