@@ -27,7 +27,7 @@ DAILY_DIR = os.path.join(DATA_DIR, "daily")
 MINUTE_CHART_API = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
 MINUTE_CHART_TR_ID = "FHKST03010200"
 
-GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-preview:generateContent"
+GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
 
 # ── 1. FinanceDataReader 주가 수집 (필수) ────────────────────────────────────
@@ -202,11 +202,14 @@ def classify_themes(stocks: list[dict], api_key: str, existing_themes: list[str]
     headers = {"Content-Type": "application/json"}
 
     # 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치)
-    batch_size = 15
+    # 최대 60개 제한, 배치 20개씩
+    stocks = stocks[:60]
+    batch_size = 20
     stock_reasons: dict[str, str] = {}
 
     for i in range(0, len(stocks), batch_size):
         batch = stocks[i:i + batch_size]
+        batch_num = i // batch_size + 1
         stock_list = "\n".join(f"- {s['종목코드']} {s['종목명']}" for s in batch)
 
         prompt = f"""아래 한국 주식 종목들이 오늘 급등했습니다.
@@ -225,25 +228,46 @@ def classify_themes(stocks: list[dict], api_key: str, existing_themes: list[str]
 종목:
 {stock_list}"""
 
+        # Search Grounding으로 시도
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.1},
         }
 
+        success = False
         for attempt in range(3):
             resp = requests.post(url, headers=headers, json=body)
             if resp.status_code == 200:
                 try:
                     reasons = _gemini_parse_json(resp.json())
                     stock_reasons.update(reasons)
+                    success = True
                     break
                 except (json.JSONDecodeError, KeyError, IndexError) as e:
-                    print(f"    검색 배치 {i//batch_size+1} 파싱 실패: {e}")
+                    print(f"    검색 배치 {batch_num} 파싱 실패: {e}")
             else:
                 wait = 15 * (attempt + 1)
-                print(f"    검색 배치 {i//batch_size+1} HTTP {resp.status_code}, {wait}초 대기...")
+                print(f"    검색 배치 {batch_num} HTTP {resp.status_code}, {wait}초 대기...")
                 time.sleep(wait)
+
+        # Grounding 실패 시 Grounding 없이 재시도 (fallback)
+        if not success:
+            print(f"    검색 배치 {batch_num} Grounding 실패 → Grounding 없이 재시도")
+            body_no_ground = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1},
+            }
+            resp = requests.post(url, headers=headers, json=body_no_ground)
+            if resp.status_code == 200:
+                try:
+                    reasons = _gemini_parse_json(resp.json())
+                    stock_reasons.update(reasons)
+                    print(f"    검색 배치 {batch_num} Grounding 없이 성공")
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    print(f"    검색 배치 {batch_num} fallback 파싱 실패: {e}")
+            else:
+                print(f"    검색 배치 {batch_num} fallback도 실패: HTTP {resp.status_code}")
 
         if i + batch_size < len(stocks):
             time.sleep(15)
