@@ -40,7 +40,9 @@ jobs:
 
       - name: 의존성 설치
         if: steps.check.outputs.skip != 'true'
-        run: pip install requests python-dotenv finance-datareader
+        run: |
+          pip install requests python-dotenv finance-datareader playwright
+          playwright install chromium --with-deps
 
       - name: KIS 토큰 캐시 복원
         if: steps.check.outputs.skip != 'true'

@@ -29,6 +29,9 @@ MINUTE_CHART_TR_ID = "FHKST03010200"
 
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
+FINUP_STOCK_URL = "https://finance.finup.co.kr/Stock/{code}"
+FINUP_THEMELOG_URL = "https://stockdata.finup.co.kr/api/themelog"
+
 
 # ── 1. FinanceDataReader 주가 수집 (필수) ────────────────────────────────────
 
@@ -337,6 +340,203 @@ JSON만 출력:
     return {}, stock_reasons
 
 
+# ── 3-B. 핀업 테마 분류 (선택) ─────────────────────────────────────────────────
+
+def classify_themes_finup(stocks: list[dict]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """핀업 테마로그에서 당일 핫 테마 → 소속 종목을 가져와 매칭.
+    1) ThemeLog API로 당일 Top 30 테마 조회
+    2) 각 테마의 THEME_RELATION_STOCK으로 소속 종목 조회
+    3) 우리 급등 종목과 교차 매칭
+    반환: (테마맵, 종목별 분류사유 dict)
+    """
+    theme_map: dict[str, list[str]] = {}
+    stock_reasons: dict[str, str] = {}
+
+    our_codes = {s["종목코드"] for s in stocks}
+    code_name = {s["종목코드"]: s["종목명"] for s in stocks}
+
+    # 1) 당일 Top 30 테마 조회
+    try:
+        resp = requests.post(
+            FINUP_THEMELOG_URL,
+            json={},
+            headers={"Content-Type": "application/json", "Origin": "https://finance.finup.co.kr"},
+            timeout=10,
+        )
+        top_themes = resp.json()
+    except Exception as e:
+        print(f"    테마로그 조회 실패: {e}")
+        return {}, {}
+
+    print(f"    테마로그 Top {len(top_themes)}개 테마 조회됨")
+
+    # 2) 각 테마별 소속 종목 조회 & 우리 종목과 매칭
+    radar_url = "https://apiradar.finup.co.kr/APP"
+    radar_headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "https://finance.finup.co.kr",
+    }
+
+    for t in top_themes:
+        keyword_idx = t["KeywordIdx"]
+        theme_name = t["Keyword"]
+        theme_diff = t.get("Diff", 0)
+
+        try:
+            payload = (
+                '{ApiGB:"THEME",ApiID:"THEME_RELATION_STOCK",'
+                f'KeywordIdx:"{keyword_idx}"'
+                '}'
+            )
+            resp = requests.post(radar_url, data=payload, headers=radar_headers, timeout=10)
+            data = resp.json()
+
+            result = data.get("Result", [])
+            theme_stocks = result[0] if result and isinstance(result[0], list) else result
+
+            # 테마 소속 종목코드 집합
+            theme_stock_codes = {s["StockCode"] for s in theme_stocks if isinstance(s, dict)}
+
+            # 우리 급등 종목과 교차
+            matched = our_codes & theme_stock_codes
+            if matched:
+                theme_map[theme_name] = list(matched)
+                for code in matched:
+                    stock_reasons.setdefault(code, [])
+                    stock_reasons[code].append(f"{theme_name}({theme_diff:+.1f}%)")
+
+                names = [code_name.get(c, c) for c in matched]
+                print(f"    {theme_name} ({theme_diff:+.1f}%): {len(matched)}개 매칭 - {', '.join(names[:5])}")
+
+        except Exception as e:
+            print(f"    {theme_name} 조회 실패: {e}")
+
+        time.sleep(0.15)
+
+    # stock_reasons를 문자열로 변환
+    stock_reasons_str: dict[str, str] = {}
+    for code, themes in stock_reasons.items():
+        stock_reasons_str[code] = "핀업 당일테마: " + ", ".join(themes)
+
+    return theme_map, stock_reasons_str
+
+
+# ── 3-C. InfoStock 테마 데이터 (선택) ─────────────────────────────────────────
+
+def fetch_infostock_data(date_str: str | None = None) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """InfoStock DailyFeaturedTheme에서 특정 날짜의 테마-종목 매핑 + 설명 스크래핑.
+
+    Args:
+        date_str: "2026-03-18" 형식. None이면 최신(당일) 날짜.
+
+    Returns:
+        (theme_map, theme_descs)
+        theme_map: {"테마명": ["종목코드1", ...]}
+        theme_descs: {"테마명": "설명 텍스트"}
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("    playwright 미설치 - InfoStock 참조 생략")
+        return {}, {}
+
+    import re
+
+    theme_map: dict[str, list[str]] = {}
+    theme_descs: dict[str, str] = {}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(
+                "https://infostock.co.kr/Theme/DailyFeaturedTheme",
+                timeout=30000,
+            )
+            page.wait_for_load_state("networkidle", timeout=15000)
+
+            # 날짜 선택 (특정 날짜 요청 시)
+            if date_str:
+                date_fmt = date_str.replace("-", ". ")  # "2026. 03. 18"
+                table0 = page.query_selector_all("table")[0]
+                for row in table0.query_selector_all("tr")[1:]:
+                    if date_fmt in row.inner_text():
+                        row.click()
+                        page.wait_for_timeout(500)
+                        break
+
+            # 1) 테마-종목코드 매핑 (HTML에서 링크 파싱)
+            tables = page.query_selector_all("table")
+            for i in range(1, len(tables)):
+                t = tables[i]
+                if not t.is_visible():
+                    continue
+
+                # 테마명 + 종목코드 추출 (링크 href에 코드 포함)
+                theme_link = t.query_selector('a[href*="ThemeDB"]')
+                if not theme_link:
+                    continue
+                theme_name = theme_link.inner_text().strip()
+                if not theme_name or "원(" in theme_name:
+                    continue
+
+                stock_links = t.query_selector_all('a[href*="stockitem?code="]')
+                codes = []
+                for sl in stock_links:
+                    href = sl.get_attribute("href") or ""
+                    # href = "https://new.infostock.co.kr/stockitem?code=000660"
+                    if "code=" in href:
+                        code = href.split("code=")[1][:6]
+                        codes.append(code)
+
+                if codes:
+                    theme_map[theme_name] = codes
+
+            # 2) 설명 텍스트 파싱 (본문 텍스트에서)
+            body_text = page.inner_text("body")
+            browser.close()
+
+        # "- 제목 -" 패턴으로 섹션 분리
+        parts = re.split(r"\n-\s+(.+?)\s+-\s*\n", body_text)
+        TABLE_HEADER = "테마명\t등락률\t종목명"
+
+        for i in range(1, len(parts) - 1, 2):
+            group_title = parts[i].strip()
+            content = parts[i + 1]
+
+            if group_title == "테마시황":
+                continue
+
+            desc_end = content.find(TABLE_HEADER)
+            if desc_end == -1:
+                continue
+            desc_text = content[:desc_end].strip()
+            if not desc_text:
+                continue
+
+            # 그룹 안의 테이블에서 테마명 추출하여 설명 매핑
+            table_parts = content.split(TABLE_HEADER)
+            for tp in table_parts[1:]:
+                lines = tp.strip().split("\n")
+                if len(lines) >= 2:
+                    cols = lines[1].split("\t")
+                    if len(cols) >= 2 and "%" in cols[1]:
+                        tname = cols[0].strip()
+                        if tname:
+                            theme_descs[tname] = desc_text
+
+    except Exception as e:
+        print(f"    InfoStock 스크래핑 실패: {e}")
+
+    return theme_map, theme_descs
+
+
+def fetch_infostock_descriptions(date_str: str | None = None) -> dict[str, str]:
+    """하위 호환: 설명만 반환."""
+    _, descs = fetch_infostock_data(date_str)
+    return descs
+
+
 # ── 4. 점수 산출 ──────────────────────────────────────────────────────────────
 
 def score_leader(stock: dict) -> float:
@@ -361,6 +561,67 @@ def score_leader(stock: dict) -> float:
 
 # ── 5. 데이터 축적 ───────────────────────────────────────────────────────────
 
+def _match_theme_description(finup_name: str, infostock_descs: dict[str, str]) -> str | None:
+    """핀업 테마명에 대응하는 InfoStock 설명을 찾는다.
+    1) 정확히 일치 2) 부분 포함 3) 키워드 매칭 4) 설명 본문 검색
+    """
+    import re
+
+    # 1) 정확 매칭
+    if finup_name in infostock_descs:
+        return infostock_descs[finup_name]
+
+    # 2) 부분 포함 매칭
+    for is_name, desc in infostock_descs.items():
+        if finup_name in is_name or is_name in finup_name:
+            return desc
+
+    # 3) 핵심 키워드 매칭 (괄호/특수문자 제거 후)
+    fn_clean = re.sub(r"[(/)\s]", "", finup_name)
+    for is_name, desc in infostock_descs.items():
+        is_clean = re.sub(r"[(/)\s]", "", is_name)
+        if fn_clean in is_clean or is_clean in fn_clean:
+            return desc
+
+    # 4) 핀업 테마명의 핵심 단어가 InfoStock 테마명에 포함되는지 확인
+    keywords = re.split(r"[/()\s,]+", finup_name)
+    keywords = [k for k in keywords if len(k) >= 2]
+    if keywords:
+        best_match = None
+        best_score = 0
+        for is_name, desc in infostock_descs.items():
+            score = sum(1 for k in keywords if k in is_name)
+            if score > best_score:
+                best_score = score
+                best_match = desc
+        if best_score > 0:
+            return best_match
+
+    # 5) 설명 본문에서 핀업 테마명이 언급되는지 확인 (공백 무시)
+    fn_nospace = finup_name.replace(" ", "")
+    for is_name, desc in infostock_descs.items():
+        if finup_name in desc or fn_nospace in desc.replace(" ", ""):
+            return desc
+
+    return None
+
+
+def _apply_theme_descriptions(themes_master: dict, theme_map: dict,
+                              theme_descriptions: dict, date_str: str):
+    """themes_master에 InfoStock 설명을 매칭하여 저장."""
+    matched = 0
+    for theme in theme_map:
+        desc = _match_theme_description(theme, theme_descriptions)
+        if desc and theme in themes_master:
+            if "설명" not in themes_master[theme]:
+                themes_master[theme]["설명"] = {}
+            themes_master[theme]["설명"][date_str] = desc
+            matched += 1
+    if matched:
+        print(f"  InfoStock 설명 매칭: {matched}/{len(theme_map)}개 테마")
+
+
+
 def _load_json(path: str, default=None):
     if default is None:
         default = {}
@@ -377,10 +638,13 @@ def _save_json(path: str, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str, stock_reasons: dict = None):
+def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str,
+                    stock_reasons: dict = None, theme_descriptions: dict = None):
     """일별 데이터 저장 + stocks.json, themes.json 마스터 업데이트."""
     if stock_reasons is None:
         stock_reasons = {}
+    if theme_descriptions is None:
+        theme_descriptions = {}
     os.makedirs(DAILY_DIR, exist_ok=True)
 
     # 종목별 테마 역매핑
@@ -428,10 +692,12 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str, stock_re
             }
         entry = stocks_master[code]
         entry["종목명"] = s["종목명"]
+        if "상승일" not in entry:
+            entry["상승일"] = {}
         if isinstance(entry.get("상승일"), list):
             entry["상승일"] = {d: 0.0 for d in entry["상승일"]}
         for t in stock_themes.get(code, []):
-            if t not in entry["테마"]:
+            if t not in entry.setdefault("테마", []):
                 entry["테마"].append(t)
         entry["상승일"][date_str] = s.get("등락률", 0.0)
 
@@ -451,6 +717,10 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str, stock_re
                 entry["종목"].append(code)
         if date_str not in entry["활성일"]:
             entry["활성일"].append(date_str)
+
+    # InfoStock 테마 설명 매칭 (핀업 테마명 ↔ InfoStock 테마명 유사 매칭)
+    if theme_descriptions:
+        _apply_theme_descriptions(themes_master, theme_map, theme_descriptions, date_str)
 
     _save_json(themes_path, themes_master)
     print(f"  테마 마스터: {themes_path} ({len(themes_master)}개 테마)")
@@ -491,27 +761,27 @@ def main():
     elif upper_count > 0:
         print("    KIS_APP_KEY 미설정 - 도달시간 생략")
 
-    # ── 3. Gemini 테마 분류 (선택) ──
+    # ── 3. 핀업 테마 분류 (메인) ──
     theme_map = {}
     stock_reasons = {}
-    if gemini_key:
-        print("[3/4] Gemini 테마 분류...")
-        # 기존 테마 목록 로드 (일관된 테마명 유지)
-        themes_path = os.path.join(DATA_DIR, "themes.json")
-        existing_themes = list(_load_json(themes_path).keys())
-        if existing_themes:
-            print(f"    기존 테마 {len(existing_themes)}개 참조")
-        try:
-            theme_map, stock_reasons = classify_themes(codes_info, gemini_key, existing_themes)
-            for theme, codes in theme_map.items():
-                print(f"    {theme}: {len(codes)}개")
-        except Exception as e:
-            print(f"    테마 분류 실패 (계속 진행): {e}")
-    else:
-        print("[3/4] GEMINI_API_KEY 미설정 - 테마 분류 생략")
+    print(f"[3/5] 핀업 테마 분류 ({len(codes_info)}개 종목)...")
+    try:
+        theme_map, stock_reasons = classify_themes_finup(codes_info)
+        print(f"    -> {len(theme_map)}개 테마, {len(stock_reasons)}개 종목 매칭")
+    except Exception as e:
+        print(f"    핀업 테마 분류 실패 (계속 진행): {e}")
 
-    # ── 4. 점수 산출 & 저장 ──
-    print("[4/4] 점수 산출...")
+    # ── 4. InfoStock 테마 설명 (참조) ──
+    theme_descriptions = {}
+    print("[4/5] InfoStock 테마 설명 수집...")
+    try:
+        theme_descriptions = fetch_infostock_descriptions()
+        print(f"    -> {len(theme_descriptions)}개 테마 설명 수집")
+    except Exception as e:
+        print(f"    InfoStock 수집 실패 (계속 진행): {e}")
+
+    # ── 5. 점수 산출 & 저장 ──
+    print("[5/5] 점수 산출...")
 
     sorted_by_vol = sorted(codes_info, key=lambda x: x.get("거래대금_백만", 0), reverse=True)
     for i, s in enumerate(sorted_by_vol, 1):
@@ -536,7 +806,7 @@ def main():
 
     # 데이터 축적
     print("\n>> 데이터 축적 중...")
-    accumulate_data(codes_info, theme_map, date_str, stock_reasons)
+    accumulate_data(codes_info, theme_map, date_str, stock_reasons, theme_descriptions)
 
 
 if __name__ == "__main__":
