@@ -32,6 +32,77 @@ GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini
 FINUP_STOCK_URL = "https://finance.finup.co.kr/Stock/{code}"
 FINUP_THEMELOG_URL = "https://stockdata.finup.co.kr/api/themelog"
 
+# ── 테마명 정규화 (핀업/InfoStock 이름 통합) ─────────────────────────────────
+# {변환 대상: 정규화된 이름}
+THEME_NORMALIZE = {
+    # 드론
+    "드론(Drone)": "드론",
+    # 원자력
+    "원자력": "원자력발전",
+    # 로봇
+    "로봇": "로봇/AI",
+    "로봇(산업용/협동로봇 등)": "로봇/AI",
+    "지능형로봇/인공지능(AI)": "로봇/AI",
+    "AI(인공지능)": "로봇/AI",
+    "피지컬AI": "로봇/AI",
+    # 반도체
+    "반도체설계": "반도체",
+    "비메모리 반도체": "반도체",
+    "반도체 장비": "반도체",
+    "반도체 재료/부품": "반도체",
+    "반도체 CXL": "반도체",
+    "반도체 대표주(생산)": "반도체",
+    "AI반도체": "반도체",
+    "D램": "반도체",
+    "DDR5": "반도체",
+    "3D 낸드": "반도체",
+    "비메모리 반도체": "반도체",
+    "차량용 반도체": "반도체",
+    # 메모리는 반도체에 합침
+    "메모리 반도체": "반도체",
+    # 제약/바이오
+    "제약업체": "제약/바이오",
+    "항암제": "제약/바이오",
+    "면역항암제": "제약/바이오",
+    "바이오시밀러(복제 바이오의약품)": "제약/바이오",
+    # 석유
+    "석유/유가": "석유화학",
+    # 에너지
+    "전력설비": "에너지/전력",
+    "ESS(전력저장장치)": "에너지/전력",
+    "풍력": "에너지/전력",
+    "풍력에너지": "에너지/전력",
+    "태양광에너지": "에너지/전력",
+    "우주태양광(페로브스카이트 등)": "에너지/전력",
+    # 자동차
+    "자동차 대표주": "자동차/자율주행",
+    "자율주행차": "자동차/자율주행",
+    # 금융
+    "증권": "금융",
+    "은행": "금융",
+    "지주사": "금융",
+    # 의료
+    "의료AI": "의료기기",
+}
+
+
+def normalize_theme(name: str) -> str:
+    """테마명을 정규화."""
+    return THEME_NORMALIZE.get(name, name)
+
+
+def normalize_theme_map(theme_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    """테마맵의 키를 정규화하고 중복 병합."""
+    merged: dict[str, list[str]] = {}
+    for theme, codes in theme_map.items():
+        norm = normalize_theme(theme)
+        if norm not in merged:
+            merged[norm] = []
+        for code in codes:
+            if code not in merged[norm]:
+                merged[norm].append(code)
+    return merged
+
 
 # ── 1. FinanceDataReader 주가 수집 (필수) ────────────────────────────────────
 
@@ -413,9 +484,13 @@ def classify_themes_finup(stocks: list[dict]) -> tuple[dict[str, list[str]], dic
 
         time.sleep(0.15)
 
-    # stock_reasons를 문자열로 변환
+    # 테마명 정규화
+    theme_map = normalize_theme_map(theme_map)
+
+    # stock_reasons를 문자열로 변환 (정규화된 이름 사용)
     stock_reasons_str: dict[str, str] = {}
     for code, themes in stock_reasons.items():
+        normalized = [normalize_theme(t.split("(")[0]) + "(" + t.split("(", 1)[1] if "(" in t else normalize_theme(t) for t in themes]
         stock_reasons_str[code] = "핀업 당일테마: " + ", ".join(themes)
 
     return theme_map, stock_reasons_str
@@ -646,6 +721,9 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str,
     if theme_descriptions is None:
         theme_descriptions = {}
     os.makedirs(DAILY_DIR, exist_ok=True)
+
+    # 테마명 정규화 (중복 테마 병합)
+    theme_map = normalize_theme_map(theme_map)
 
     # 종목별 테마 역매핑
     stock_themes: dict[str, list[str]] = {}
