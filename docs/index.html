@@ -43,6 +43,12 @@ tr:hover { background: #1c2128; }
 .leader-badge { background: #3d2a00; color: #d29922; border: 1px solid #d29922; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 4px; }
 .alpha-btn { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 0.7rem; margin-left: 4px; background: #1a2d1a; color: #3fb950; border: 1px solid #238636; text-decoration: none; vertical-align: middle; cursor: pointer; }
 .alpha-btn:hover { background: #238636; color: #fff; }
+.heatmap { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 16px; }
+.heatmap-box { border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; transition: opacity 0.15s; overflow: hidden; padding: 4px; }
+.heatmap-box:hover { opacity: 0.8; }
+.heatmap-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.heatmap-pct { font-weight: 700; }
+.heatmap-vol { font-size: 0.65rem; opacity: 0.8; }
 
 /* 모바일 카드 레이아웃 */
 .m-cards { display: none; }
@@ -100,6 +106,7 @@ tr:hover { background: #1c2128; }
 
   <!-- 테마별 -->
   <div id="themes" class="view">
+    <div id="themeHeatmap" class="heatmap"></div>
     <div id="themeList"></div>
     <div id="themeDetail" style="display:none"></div>
   </div>
@@ -208,6 +215,7 @@ async function init() {
   }
 
   select.addEventListener('change', () => loadDaily(select.value));
+  await renderThemeHeatmap();
   renderThemeList();
   renderStockList();
 
@@ -395,6 +403,81 @@ async function loadDailyThemes(date) {
   document.getElementById('dtContent').innerHTML = html;
 }
 
+// ── 테마 히트맵 ──
+async function renderThemeHeatmap() {
+  // 모든 활성일 데이터를 로드
+  const allDates = new Set();
+  Object.values(themesData).forEach(t => t.활성일?.forEach(d => allDates.add(d)));
+  for (const date of allDates) {
+    if (!dailyCache[date]) {
+      dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+    }
+  }
+
+  // 테마별 거래대금 합산 & 평균 등락률 계산
+  const themeStats = [];
+  Object.entries(themesData).forEach(([theme, info]) => {
+    const codes = info.종목 || [];
+    const dates = info.활성일 || [];
+    let totalVol = 0;
+    let totalPct = 0;
+    let count = 0;
+
+    dates.forEach(date => {
+      const dayData = dailyCache[date] || [];
+      dayData.forEach(s => {
+        if (codes.includes(s.종목코드)) {
+          totalVol += (s.거래대금_백만 || 0);
+          totalPct += (s.등락률 || 0);
+          count++;
+        }
+      });
+    });
+
+    if (count > 0) {
+      themeStats.push({ theme, vol: totalVol, avgPct: totalPct / count });
+    }
+  });
+
+  if (themeStats.length === 0) return;
+
+  themeStats.sort((a, b) => b.vol - a.vol);
+  const maxVol = themeStats[0].vol;
+
+  // 색상: 등락률에 따라 빨강 계열 강도 조절
+  function heatColor(pct) {
+    const clamped = Math.max(0, Math.min(pct, 30));
+    const ratio = clamped / 30;
+    const r = Math.round(40 + ratio * 180);
+    const g = Math.round(30 - ratio * 15);
+    const b = Math.round(30 - ratio * 15);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  const el = document.getElementById('themeHeatmap');
+  const containerWidth = el.offsetWidth || 1160;
+  const totalArea = containerWidth * 300;
+
+  let html = '';
+  themeStats.forEach(s => {
+    const areaRatio = s.vol / maxVol;
+    const area = Math.max(totalArea * areaRatio * 0.3, 3600);
+    const w = Math.max(Math.sqrt(area * 1.6), 60);
+    const h = Math.max(area / w, 50);
+    const fontSize = Math.min(Math.max(w / 10, 10), 16);
+    const pctSize = Math.min(Math.max(w / 8, 12), 20);
+    const color = heatColor(s.avgPct);
+    const volText = s.vol >= 10000 ? (s.vol / 10000).toFixed(1) + '조' : (s.vol / 100).toFixed(0) + '억';
+
+    html += `<div class="heatmap-box" style="width:${w.toFixed(0)}px;height:${h.toFixed(0)}px;background:${color}" onclick="showThemeDetail('${s.theme}')">
+      <span class="heatmap-name" style="font-size:${fontSize.toFixed(1)}px">${s.theme}</span>
+      <span class="heatmap-pct" style="font-size:${pctSize.toFixed(1)}px;color:#ff6b6b">+${s.avgPct.toFixed(1)}%</span>
+      <span class="heatmap-vol">${volText}</span>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
+
 // ── 테마 목록 ──
 function renderThemeList() {
   const el = document.getElementById('themeList');
@@ -428,6 +511,7 @@ function renderThemeList() {
 async function showThemeDetail(theme, fromPopstate) {
   switchTab('themes');
   document.getElementById('themeList').style.display = 'none';
+  document.getElementById('themeHeatmap').style.display = 'none';
   const el = document.getElementById('themeDetail');
   el.style.display = 'block';
 
@@ -494,6 +578,7 @@ async function showThemeDetail(theme, fromPopstate) {
 
 function backToThemeList(silent) {
   document.getElementById('themeList').style.display = '';
+  document.getElementById('themeHeatmap').style.display = '';
   document.getElementById('themeDetail').style.display = 'none';
 }
 
