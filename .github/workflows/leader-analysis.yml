@@ -6,6 +6,8 @@ on:
   schedule:
     # 평일 16:00 KST = UTC 07:00 (월~금)
     - cron: '0 7 * * 1-5'
+    # 재시도: 17:30 KST = UTC 08:30 (16:00 실패 대비)
+    - cron: '30 8 * * 1-5'
 
 permissions:
   contents: write
@@ -18,32 +20,64 @@ jobs:
       - name: 코드 체크아웃
         uses: actions/checkout@v4
 
+      - name: 오늘 데이터 존재 확인
+        id: check
+        run: |
+          TODAY=$(TZ=Asia/Seoul date +%Y-%m-%d)
+          if [ -f "docs/data/daily/${TODAY}.json" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "오늘(${TODAY}) 데이터 이미 존재 → 스킵"
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+            echo "오늘(${TODAY}) 데이터 없음 → 수집 시작"
+          fi
+
       - name: Python 설정
+        if: steps.check.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: 의존성 설치
-        run: pip install requests python-dotenv
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          pip install requests python-dotenv finance-datareader playwright
+          playwright install chromium --with-deps
 
       - name: KIS 토큰 캐시 복원
+        if: steps.check.outputs.skip != 'true'
         uses: actions/cache@v4
         with:
           path: token.json
           key: kis-token
 
-      - name: 대장주 분석 실행
+      - name: 대장주 분석 실행 (최대 3회 재시도)
+        if: steps.check.outputs.skip != 'true'
         env:
           KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
           KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
           KIS_IS_MOCK: ${{ vars.KIS_IS_MOCK || 'false' }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python analyze_leaders.py
+        run: |
+          for attempt in 1 2 3; do
+            echo "=== 시도 ${attempt}/3 ==="
+            if python analyze_leaders.py; then
+              echo "성공!"
+              exit 0
+            fi
+            if [ $attempt -lt 3 ]; then
+              echo "실패, 60초 후 재시도..."
+              sleep 60
+            fi
+          done
+          echo "3회 모두 실패"
+          exit 1
 
       - name: 데이터 커밋
+        if: steps.check.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/data/
-          git diff --cached --quiet || git commit -m "데이터 업데이트 $(date +%Y-%m-%d)"
+          git diff --cached --quiet || git commit -m "데이터 업데이트 $(TZ=Asia/Seoul date +%Y-%m-%d)"
           git push

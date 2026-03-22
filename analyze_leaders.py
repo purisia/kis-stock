@@ -3,11 +3,10 @@
 
 매 평일 장 마감 후 GitHub Actions에서 실행.
 수집 흐름:
-1. 등락률 순위 API -> 상위 N개 선정
-2. 종목별 상세 시세 조회 (시총, 거래대금, 거래량증가율, 상한가)
-3. 상한가 종목만 분봉 API로 최초 도달시간 조회
-4. Gemini API로 테마/섹터 분류
-5. 대장주 점수 산출 -> data/ 폴더에 JSON 축적
+1. FinanceDataReader로 당일 전체 종목 시세 수집 (필수 - 실패 시 스크립트 중단)
+2. 상한가 종목만 KIS 분봉 API로 도달시간 조회 (선택 - 실패해도 계속)
+3. Gemini API로 테마/섹터 분류 (선택 - 실패해도 계속)
+4. 대장주 점수 산출 -> docs/data/ 폴더에 JSON 축적
 """
 
 import json
@@ -25,36 +24,89 @@ DAILY_DIR = os.path.join(DATA_DIR, "daily")
 
 # ── API 상수 ──────────────────────────────────────────────────────────────────
 
-FLUCTUATION_API = "/uapi/domestic-stock/v1/ranking/fluctuation"
-FLUCTUATION_TR_ID = "FHPST01700000"
-
-INQUIRE_PRICE_API = "/uapi/domestic-stock/v1/quotations/inquire-price"
-INQUIRE_PRICE_TR_ID = "FHKST01010100"
-
 MINUTE_CHART_API = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
 MINUTE_CHART_TR_ID = "FHKST03010200"
 
-DEF_FLUCT_PARAMS = {
-    "fid_cond_mrkt_div_code": "J",
-    "fid_cond_scr_div_code": "20170",
-    "fid_input_iscd": "0000",
-    "fid_rank_sort_cls_code": "0",
-    "fid_input_cnt_1": "0",
-    "fid_prc_cls_code": "0",
-    "fid_input_price_1": "",
-    "fid_input_price_2": "",
-    "fid_vol_cnt": "",
-    "fid_trgt_cls_code": "0",
-    "fid_trgt_exls_cls_code": "0",
-    "fid_div_cls_code": "0",
-    "fid_rsfl_rate1": "",
-    "fid_rsfl_rate2": "",
-}
-
 GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
 
+FINUP_STOCK_URL = "https://finance.finup.co.kr/Stock/{code}"
+FINUP_THEMELOG_URL = "https://stockdata.finup.co.kr/api/themelog"
 
-# ── 공통 헬퍼 ─────────────────────────────────────────────────────────────────
+# ── 테마명 정규화 (핀업/InfoStock 이름 통합) ─────────────────────────────────
+# {변환 대상: 정규화된 이름}
+THEME_NORMALIZE = {
+    # InfoStock → 핀업 이름 매핑 (핀업 테마명이 기준)
+    "드론(Drone)": "드론",
+    "원자력발전": "원자력",
+    "로봇(산업용/협동로봇 등)": "로봇",
+    "지능형로봇/인공지능(AI)": "AI(인공지능)",
+    "의료AI": "의료기기",
+    "바이오시밀러(복제 바이오의약품)": "제약/바이오",
+    "면역항암제": "항암제",
+    "풍력에너지": "풍력",
+    "태양광에너지": "태양광에너지",
+    "우주태양광(페로브스카이트 등)": "태양광에너지",
+    "자동차 대표주": "자율주행차",
+    "로봇/AI": "로봇",
+    "피지컬AI": "로봇",
+}
+
+
+def normalize_theme(name: str) -> str:
+    """테마명을 정규화."""
+    return THEME_NORMALIZE.get(name, name)
+
+
+def normalize_theme_map(theme_map: dict[str, list[str]]) -> dict[str, list[str]]:
+    """테마맵의 키를 정규화하고 중복 병합."""
+    merged: dict[str, list[str]] = {}
+    for theme, codes in theme_map.items():
+        norm = normalize_theme(theme)
+        if norm not in merged:
+            merged[norm] = []
+        for code in codes:
+            if code not in merged[norm]:
+                merged[norm].append(code)
+    return merged
+
+
+# ── 1. FinanceDataReader 주가 수집 (필수) ────────────────────────────────────
+
+def fetch_rising_stocks(min_rate: float = 10.0) -> list[dict]:
+    """FinanceDataReader로 당일 등락률 10%+ 종목 수집."""
+    import FinanceDataReader as fdr
+    import pandas as pd
+
+    kospi = fdr.StockListing("KOSPI")
+    kosdaq = fdr.StockListing("KOSDAQ")
+    all_stocks = pd.concat([kospi, kosdaq], ignore_index=True)
+
+    rising = all_stocks[all_stocks["ChagesRatio"] >= min_rate].copy()
+    rising = rising.sort_values("ChagesRatio", ascending=False).reset_index(drop=True)
+
+    results = []
+    for _, row in rising.iterrows():
+        # 상한가 판별: 등락률 29.5%+ & 고가 == 종가
+        is_upper = row["ChagesRatio"] >= 29.5 and row["High"] == row["Close"]
+        results.append({
+            "종목코드": row["Code"],
+            "종목명": row["Name"],
+            "시가": int(row["Open"]),
+            "고가": int(row["High"]),
+            "종가": int(row["Close"]),
+            "등락률": round(row["ChagesRatio"], 2),
+            "거래대금_백만": int(row["Amount"] / 1e6),
+            "시가총액_억": int(row["Marcap"] / 1e8),
+            "거래량증가율": 0.0,
+            "상한가시간": "-",
+            "_is_upper": is_upper,
+            "_close": int(row["Close"]),
+        })
+
+    return results
+
+
+# ── 2. KIS 상한가 도달시간 (선택) ────────────────────────────────────────────
 
 def _base_url(is_mock: bool = False) -> str:
     if is_mock:
@@ -63,7 +115,6 @@ def _base_url(is_mock: bool = False) -> str:
 
 
 def _get_access_token(app_key: str, app_secret: str, is_mock: bool = False) -> str:
-    """OAuth 토큰 발급."""
     url = f"{_base_url(is_mock)}/oauth2/tokenP"
     body = {"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret}
     resp = requests.post(url, headers={"content-type": "application/json"}, json=body)
@@ -75,172 +126,37 @@ def _get_access_token(app_key: str, app_secret: str, is_mock: bool = False) -> s
 
 
 def get_or_refresh_token(app_key: str, app_secret: str, is_mock: bool = False) -> str:
-    """token.json 캐시 확인 후 재사용 또는 새로 발급."""
     try:
         if os.path.exists(TOKEN_FILE):
             with open(TOKEN_FILE, "r") as f:
                 data = json.load(f)
             expiry = datetime.fromisoformat(data["expiry"])
             if datetime.now() < expiry - timedelta(hours=1):
-                print(f"캐시된 토큰 재사용 (만료: {data['expiry']})")
+                print(f"    캐시된 토큰 재사용 (만료: {data['expiry']})")
                 return data["access_token"]
     except Exception:
         pass
-    print("새 토큰 발급 중...")
+    print("    새 토큰 발급 중...")
     access_token = _get_access_token(app_key, app_secret, is_mock)
     expiry = datetime.now() + timedelta(hours=24)
     with open(TOKEN_FILE, "w") as f:
         json.dump({"access_token": access_token, "expiry": expiry.isoformat()}, f)
-    print(f"토큰 저장 완료 (만료: {expiry.isoformat()})")
     return access_token
 
 
-def _kis_headers(
-    access_token: str,
-    app_key: str,
-    app_secret: str,
-    tr_id: str,
-    tr_cont: str = "",
-) -> dict:
-    h = {
+def _kis_headers(access_token: str, app_key: str, app_secret: str, tr_id: str) -> dict:
+    return {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {access_token}",
         "appkey": app_key,
         "appsecret": app_secret,
         "tr_id": tr_id,
     }
-    if tr_cont:
-        h["tr_cont"] = tr_cont
-    return h
 
-
-# ── 1. 등락률 순위 ────────────────────────────────────────────────────────────
-
-def fetch_fluctuation_top(
-    access_token: str,
-    app_key: str,
-    app_secret: str,
-    is_mock: bool = False,
-    min_advance: float = 10.0,
-    top_n: int = 100,
-) -> list[dict]:
-    """등락률 순위 조회. 여러 마켓/분류 조합으로 조회 후 병합 (API 누락 방지)."""
-    url = f"{_base_url(is_mock)}{FLUCTUATION_API}"
-    all_rows: list[dict] = []
-    seen_codes: set[str] = set()
-
-    # (라벨, 시장코드, 종목필터, 분류코드)
-    # 전체(J,0000)는 정렬 정상 → 등락률 기반 조기종료
-    # 코스피/코스닥/NX 개별 조회는 정렬이 깨짐 → 새 종목 없을 때까지 계속
-    queries = [
-        ("J-전체",  "J",  "0000", "0"),
-        ("J-전체-우선주", "J", "0000", "2"),
-        ("J-코스피", "J",  "0001", "0"),
-        ("J-코스닥", "J",  "1001", "0"),
-        ("NX-전체", "NX", "0000", "0"),
-        ("NX-코스피", "NX", "0001", "0"),
-        ("NX-코스닥", "NX", "1001", "0"),
-    ]
-
-    for label, mrkt, iscd, div_cls in queries:
-        mkt_new = 0
-        for offset in range(0, 300, 30):
-            params = dict(DEF_FLUCT_PARAMS)
-            params["fid_cond_mrkt_div_code"] = mrkt
-            params["fid_input_iscd"] = iscd
-            params["fid_input_cnt_1"] = str(offset)
-            params["fid_div_cls_code"] = div_cls
-
-            headers = _kis_headers(access_token, app_key, app_secret, FLUCTUATION_TR_ID)
-            resp = requests.get(url, headers=headers, params=params)
-            resp.raise_for_status()
-            data = resp.json()
-
-            chunk = data.get("output", [])
-            if not chunk:
-                break
-
-            last_rate = 0.0
-            new_count = 0
-            for row in chunk:
-                code = row.get("stck_shrn_iscd", "")
-                if code in seen_codes:
-                    continue
-                seen_codes.add(code)
-                try:
-                    rate = float(row.get("prdy_ctrt", 0))
-                except (ValueError, TypeError):
-                    rate = 0.0
-                row["_rate"] = rate
-                all_rows.append(row)
-                last_rate = rate
-                new_count += 1
-
-            mkt_new += new_count
-
-            # J-전체 보통주는 정렬되므로 등락률 기준 조기종료
-            if mrkt == "J" and iscd == "0000" and div_cls == "0":
-                if last_rate < min_advance:
-                    break
-            else:
-                if new_count == 0:
-                    break
-            time.sleep(0.15)
-
-        if mkt_new > 0:
-            print(f"    {label}: {mkt_new}개 수집")
-
-    result = [r for r in all_rows if r["_rate"] >= min_advance]
-    result.sort(key=lambda r: r["_rate"], reverse=True)
-    return result[:top_n]
-
-
-# ── 2. 종목 상세 시세 ─────────────────────────────────────────────────────────
-
-def fetch_stock_detail(
-    access_token: str,
-    app_key: str,
-    app_secret: str,
-    stock_code: str,
-    is_mock: bool = False,
-) -> dict:
-    """개별 종목 현재가 시세."""
-    url = f"{_base_url(is_mock)}{INQUIRE_PRICE_API}"
-    headers = _kis_headers(access_token, app_key, app_secret, INQUIRE_PRICE_TR_ID)
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": stock_code}
-
-    resp = requests.get(url, headers=headers, params=params)
-    resp.raise_for_status()
-    out = resp.json().get("output", {})
-
-    if not out:
-        return {
-            "시가총액_억": 0, "거래대금_백만": 0, "거래량증가율": 0.0,
-            "상한가": "", "현재가": "",
-        }
-
-    acml_vol = int(out.get("acml_vol") or 0)
-    prdy_vol = int(out.get("prdy_vol") or 0)
-    vol_rate = round((acml_vol / prdy_vol - 1) * 100, 1) if prdy_vol > 0 else 0.0
-
-    return {
-        "시가총액_억": int(out.get("hts_avls") or 0),
-        "거래대금_백만": int(out.get("acml_tr_pbmn") or 0) // 1_000_000,
-        "거래량증가율": vol_rate,
-        "상한가": out.get("stck_mxpr", ""),
-        "현재가": out.get("stck_prpr", ""),
-    }
-
-
-# ── 3. 상한가 최초 도달시간 (분봉 스캔) ───────────────────────────────────────
 
 def fetch_upper_limit_time(
-    access_token: str,
-    app_key: str,
-    app_secret: str,
-    stock_code: str,
-    upper_limit_price: str,
-    is_mock: bool = False,
+    access_token: str, app_key: str, app_secret: str,
+    stock_code: str, upper_limit_price: str, is_mock: bool = False,
 ) -> str:
     """분봉 API로 당일 고가 == 상한가인 최초 시간 탐색."""
     url = f"{_base_url(is_mock)}{MINUTE_CHART_API}"
@@ -282,10 +198,27 @@ def fetch_upper_limit_time(
     return "-"
 
 
-# ── 4. Gemini 테마 분류 ───────────────────────────────────────────────────────
+def enrich_upper_limit_times(stocks: list[dict], app_key: str, app_secret: str, is_mock: bool):
+    """상한가 종목들의 도달시간을 KIS API로 채움."""
+    upper_candidates = [s for s in stocks if s.get("_is_upper")]
+    if not upper_candidates:
+        return
+
+    access_token = get_or_refresh_token(app_key, app_secret, is_mock)
+
+    for s in upper_candidates:
+        hit_time = fetch_upper_limit_time(
+            access_token, app_key, app_secret,
+            s["종목코드"], str(s["_close"]), is_mock,
+        )
+        s["상한가시간"] = hit_time
+        print(f"    {s['종목코드']} {s['종목명']} -> {hit_time}")
+        time.sleep(0.15)
+
+
+# ── 3. Gemini 테마 분류 (선택) ───────────────────────────────────────────────
 
 def _gemini_parse_json(resp_json: dict) -> dict:
-    """Gemini 응답에서 JSON 파싱. 여러 parts, ```json``` 래핑 처리."""
     parts = resp_json["candidates"][0]["content"]["parts"]
     text = ""
     for part in parts:
@@ -299,68 +232,122 @@ def _gemini_parse_json(resp_json: dict) -> dict:
     return json.loads(text.strip())
 
 
-def classify_themes(stocks: list[dict], api_key: str) -> dict[str, list[str]]:
-    """Gemini API로 종목 테마 분류. 2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류."""
+def classify_themes(stocks: list[dict], api_key: str, existing_themes: list[str] = None) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Gemini API로 종목 테마 분류.
+    2단계: 1) 웹검색으로 급등사유 파악 2) 테마 통합 분류.
+    existing_themes: 기존 themes.json의 테마명 목록 (일관성 유지용)
+    반환: (테마맵, 종목별 분류사유 dict)
+    """
     url = f"{GEMINI_API_URL}?key={api_key}"
     headers = {"Content-Type": "application/json"}
 
-    # ── 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치) ──
-    batch_size = 15
-    stock_reasons: list[str] = []
+    # 1단계: 웹 검색으로 각 종목 급등 사유 파악 (배치)
+    # 최대 60개 제한, 배치 20개씩
+    stocks = stocks[:60]
+    batch_size = 20
+    stock_reasons: dict[str, str] = {}
 
     for i in range(0, len(stocks), batch_size):
         batch = stocks[i:i + batch_size]
+        batch_num = i // batch_size + 1
         stock_list = "\n".join(f"- {s['종목코드']} {s['종목명']}" for s in batch)
 
         prompt = f"""아래 한국 주식 종목들이 오늘 급등했습니다.
-각 종목을 웹 검색해서 실제 사업내용과 급등 사유를 1줄로 정리해주세요.
-종목명만으로 추측하지 말고 반드시 검색하세요.
+각 종목을 웹 검색해서 다음을 조사해주세요:
 
-형식 (JSON): {{"종목코드": "사업내용 - 급등사유 요약"}}
+1. 실제 사업내용 (주력 제품/서비스)
+2. 최근 3개월 뉴스/기사 기반 급등 사유
+3. 밸류체인 연결: 이 회사의 제품이 어떤 산업에 쓰이는지 (예: 절삭공구 → 반도체/AI 장비 가공, 전선 → 전력기기)
+
+종목명만으로 추측하지 말고 반드시 최근 기사를 검색하세요.
+한국경제, 매일경제, 이데일리 등 한국 경제 언론사 기사와 DART 공시를 중심으로 조사하세요.
+특히 "왜 오늘 올랐는지"보다 "어떤 테마/산업과 연결되는지"가 중요합니다.
+
+형식 (JSON): {{"종목코드": "주력사업 | 밸류체인연결 | 최근3개월 핵심 재료/뉴스"}}
 
 종목:
 {stock_list}"""
 
+        # Search Grounding으로 시도
         body = {
             "contents": [{"parts": [{"text": prompt}]}],
             "tools": [{"google_search": {}}],
             "generationConfig": {"temperature": 0.1},
         }
 
+        success = False
         for attempt in range(3):
             resp = requests.post(url, headers=headers, json=body)
             if resp.status_code == 200:
                 try:
                     reasons = _gemini_parse_json(resp.json())
-                    for code, reason in reasons.items():
-                        stock_reasons.append(f"- {code} {reason}")
+                    stock_reasons.update(reasons)
+                    success = True
                     break
                 except (json.JSONDecodeError, KeyError, IndexError) as e:
-                    print(f"    검색 배치 {i//batch_size+1} 파싱 실패: {e}")
+                    print(f"    검색 배치 {batch_num} 파싱 실패: {e}")
             else:
                 wait = 15 * (attempt + 1)
-                print(f"    검색 배치 {i//batch_size+1} HTTP {resp.status_code}, {wait}초 대기...")
+                print(f"    검색 배치 {batch_num} HTTP {resp.status_code}, {wait}초 대기...")
                 time.sleep(wait)
 
+        # Grounding 실패 시 Grounding 없이 재시도 (fallback)
+        if not success:
+            print(f"    검색 배치 {batch_num} Grounding 실패 → Grounding 없이 재시도")
+            body_no_ground = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"temperature": 0.1},
+            }
+            resp = requests.post(url, headers=headers, json=body_no_ground)
+            if resp.status_code == 200:
+                try:
+                    reasons = _gemini_parse_json(resp.json())
+                    stock_reasons.update(reasons)
+                    print(f"    검색 배치 {batch_num} Grounding 없이 성공")
+                except (json.JSONDecodeError, KeyError, IndexError) as e:
+                    print(f"    검색 배치 {batch_num} fallback 파싱 실패: {e}")
+            else:
+                print(f"    검색 배치 {batch_num} fallback도 실패: HTTP {resp.status_code}")
+
         if i + batch_size < len(stocks):
-            time.sleep(8)
+            time.sleep(15)
 
     if not stock_reasons:
-        return {}
+        return {}, {}
 
     print(f"    검색 완료: {len(stock_reasons)}개 종목 사유 파악")
 
-    # ── 2단계: 검색 결과 기반 테마 통합 분류 (검색 없이) ──
-    reasons_text = "\n".join(stock_reasons)
-    classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용과 급등 사유입니다.
+    # 2단계: 검색 결과 기반 테마 통합 분류
+    # 종목코드 + 종목명 + 사유를 함께 전달
+    code_name_map = {s["종목코드"]: s["종목명"] for s in stocks}
+    reasons_lines = []
+    for code, reason in stock_reasons.items():
+        name = code_name_map.get(code, code)
+        reasons_lines.append(f"- {code} {name}: {reason}")
+    reasons_text = "\n".join(reasons_lines)
+
+    existing_list = ""
+    if existing_themes:
+        existing_list = "\n기존 테마 목록 (가능하면 이 이름을 우선 사용):\n" + ", ".join(existing_themes)
+
+    classify_prompt = f"""아래는 오늘 급등한 한국 주식 종목들의 사업내용, 밸류체인, 최근 뉴스입니다.
 이 정보를 바탕으로 테마/섹터별로 분류해주세요.
+
+**핵심 원칙**: 반드시 각 종목의 "실제 사업내용"과 "밸류체인 연결"을 읽고 분류하세요.
+종목명(회사명)에 "약품", "바이오", "건설" 등이 들어있어도 실제 사업이 다르면 종목명을 무시하세요.
+예: "국전약품" → 종목명에 약품이 있지만 실제는 반도체소재/HBM소재 기업 → "반도체/디스플레이"
 
 규칙:
 1. 같은 재료/뉴스로 동반 상승한 종목들을 하나의 테마로 묶기
-2. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
-3. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
-4. 한 종목이 여러 테마에 속할 수 있음
-5. 어울리는 테마 없으면 "기타"로
+2. 밸류체인 연결 고려: 직접 해당 산업이 아니더라도 제품이 해당 산업에 공급되면 포함
+   예: 절삭공구 회사 → 반도체 장비 가공에 사용 → "AI 반도체/반도체 장비" 테마 가능
+   예: 전선/케이블 → 전력망 → "전력기기" 테마 가능
+3. 테마명은 시장에서 실제 쓰는 구체적 이름 (예: "AI 반도체", "비만치료제", "전력기기", "HBM")
+4. 기존 테마에 해당하는 종목은 반드시 기존 테마명을 그대로 사용. 새 테마는 기존에 없는 경우에만 생성
+5. 테마 수는 5~15개 사이로 유지. 너무 세분화 금지
+6. 한 종목이 여러 테마에 속할 수 있음
+7. 어울리는 테마 없으면 "기타"로
+{existing_list}
 
 JSON만 출력:
 {{"테마명": ["종목코드1", "종목코드2"]}}
@@ -378,7 +365,8 @@ JSON만 출력:
         resp = requests.post(url, headers=headers, json=body)
         if resp.status_code == 200:
             try:
-                return _gemini_parse_json(resp.json())
+                theme_map = _gemini_parse_json(resp.json())
+                return theme_map, stock_reasons
             except (json.JSONDecodeError, KeyError, IndexError) as e:
                 print(f"    분류 파싱 실패: {e}")
         else:
@@ -386,22 +374,214 @@ JSON만 출력:
             print(f"    분류 HTTP {resp.status_code}, {wait}초 대기...")
             time.sleep(wait)
 
-    return {}
+    return {}, stock_reasons
 
 
-# ── 5. 점수 산출 ──────────────────────────────────────────────────────────────
+# ── 3-B. 핀업 테마 분류 (선택) ─────────────────────────────────────────────────
+
+def classify_themes_finup(stocks: list[dict]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """핀업 테마로그에서 당일 핫 테마 → 소속 종목을 가져와 매칭.
+    1) ThemeLog API로 당일 Top 30 테마 조회
+    2) 각 테마의 THEME_RELATION_STOCK으로 소속 종목 조회
+    3) 우리 급등 종목과 교차 매칭
+    반환: (테마맵, 종목별 분류사유 dict)
+    """
+    theme_map: dict[str, list[str]] = {}
+    stock_reasons: dict[str, str] = {}
+
+    our_codes = {s["종목코드"] for s in stocks}
+    code_name = {s["종목코드"]: s["종목명"] for s in stocks}
+
+    # 1) 당일 Top 30 테마 조회
+    try:
+        resp = requests.post(
+            FINUP_THEMELOG_URL,
+            json={},
+            headers={"Content-Type": "application/json", "Origin": "https://finance.finup.co.kr"},
+            timeout=10,
+        )
+        top_themes = resp.json()
+    except Exception as e:
+        print(f"    테마로그 조회 실패: {e}")
+        return {}, {}
+
+    print(f"    테마로그 Top {len(top_themes)}개 테마 조회됨")
+
+    # 2) 각 테마별 소속 종목 조회 & 우리 종목과 매칭
+    radar_url = "https://apiradar.finup.co.kr/APP"
+    radar_headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "https://finance.finup.co.kr",
+    }
+
+    for t in top_themes:
+        keyword_idx = t["KeywordIdx"]
+        theme_name = t["Keyword"]
+        theme_diff = t.get("Diff", 0)
+
+        try:
+            payload = (
+                '{ApiGB:"THEME",ApiID:"THEME_RELATION_STOCK",'
+                f'KeywordIdx:"{keyword_idx}"'
+                '}'
+            )
+            resp = requests.post(radar_url, data=payload, headers=radar_headers, timeout=10)
+            data = resp.json()
+
+            result = data.get("Result", [])
+            theme_stocks = result[0] if result and isinstance(result[0], list) else result
+
+            # 테마 소속 종목코드 집합
+            theme_stock_codes = {s["StockCode"] for s in theme_stocks if isinstance(s, dict)}
+
+            # 우리 급등 종목과 교차
+            matched = our_codes & theme_stock_codes
+            if matched:
+                theme_map[theme_name] = list(matched)
+                for code in matched:
+                    stock_reasons.setdefault(code, [])
+                    stock_reasons[code].append(f"{theme_name}({theme_diff:+.1f}%)")
+
+                names = [code_name.get(c, c) for c in matched]
+                print(f"    {theme_name} ({theme_diff:+.1f}%): {len(matched)}개 매칭 - {', '.join(names[:5])}")
+
+        except Exception as e:
+            print(f"    {theme_name} 조회 실패: {e}")
+
+        time.sleep(0.15)
+
+    # 테마명 정규화
+    theme_map = normalize_theme_map(theme_map)
+
+    # stock_reasons를 문자열로 변환 (정규화된 이름 사용)
+    stock_reasons_str: dict[str, str] = {}
+    for code, themes in stock_reasons.items():
+        normalized = [normalize_theme(t.split("(")[0]) + "(" + t.split("(", 1)[1] if "(" in t else normalize_theme(t) for t in themes]
+        stock_reasons_str[code] = "핀업 당일테마: " + ", ".join(themes)
+
+    return theme_map, stock_reasons_str
+
+
+# ── 3-C. InfoStock 테마 데이터 (선택) ─────────────────────────────────────────
+
+def fetch_infostock_data(date_str: str | None = None) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """InfoStock DailyFeaturedTheme에서 특정 날짜의 테마-종목 매핑 + 설명 스크래핑.
+
+    Args:
+        date_str: "2026-03-18" 형식. None이면 최신(당일) 날짜.
+
+    Returns:
+        (theme_map, theme_descs)
+        theme_map: {"테마명": ["종목코드1", ...]}
+        theme_descs: {"테마명": "설명 텍스트"}
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("    playwright 미설치 - InfoStock 참조 생략")
+        return {}, {}
+
+    import re
+
+    theme_map: dict[str, list[str]] = {}
+    theme_descs: dict[str, str] = {}
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(
+                "https://infostock.co.kr/Theme/DailyFeaturedTheme",
+                timeout=30000,
+            )
+            page.wait_for_load_state("networkidle", timeout=15000)
+
+            # 날짜 선택 (특정 날짜 요청 시)
+            if date_str:
+                date_fmt = date_str.replace("-", ". ")  # "2026. 03. 18"
+                table0 = page.query_selector_all("table")[0]
+                for row in table0.query_selector_all("tr")[1:]:
+                    if date_fmt in row.inner_text():
+                        row.click()
+                        page.wait_for_timeout(500)
+                        break
+
+            # 1) 테마-종목코드 매핑 (HTML에서 링크 파싱)
+            tables = page.query_selector_all("table")
+            for i in range(1, len(tables)):
+                t = tables[i]
+                if not t.is_visible():
+                    continue
+
+                # 테마명 + 종목코드 추출 (링크 href에 코드 포함)
+                theme_link = t.query_selector('a[href*="ThemeDB"]')
+                if not theme_link:
+                    continue
+                theme_name = theme_link.inner_text().strip()
+                if not theme_name or "원(" in theme_name:
+                    continue
+
+                stock_links = t.query_selector_all('a[href*="stockitem?code="]')
+                codes = []
+                for sl in stock_links:
+                    href = sl.get_attribute("href") or ""
+                    # href = "https://new.infostock.co.kr/stockitem?code=000660"
+                    if "code=" in href:
+                        code = href.split("code=")[1][:6]
+                        codes.append(code)
+
+                if codes:
+                    theme_map[theme_name] = codes
+
+            # 2) 설명 텍스트 파싱 (본문 텍스트에서)
+            body_text = page.inner_text("body")
+            browser.close()
+
+        # "- 제목 -" 패턴으로 섹션 분리
+        parts = re.split(r"\n-\s+(.+?)\s+-\s*\n", body_text)
+        TABLE_HEADER = "테마명\t등락률\t종목명"
+
+        for i in range(1, len(parts) - 1, 2):
+            group_title = parts[i].strip()
+            content = parts[i + 1]
+
+            if group_title == "테마시황":
+                continue
+
+            desc_end = content.find(TABLE_HEADER)
+            if desc_end == -1:
+                continue
+            desc_text = content[:desc_end].strip()
+            if not desc_text:
+                continue
+
+            # 그룹 안의 테이블에서 테마명 추출하여 설명 매핑
+            table_parts = content.split(TABLE_HEADER)
+            for tp in table_parts[1:]:
+                lines = tp.strip().split("\n")
+                if len(lines) >= 2:
+                    cols = lines[1].split("\t")
+                    if len(cols) >= 2 and "%" in cols[1]:
+                        tname = cols[0].strip()
+                        if tname:
+                            theme_descs[tname] = desc_text
+
+    except Exception as e:
+        print(f"    InfoStock 스크래핑 실패: {e}")
+
+    return theme_map, theme_descs
+
+
+def fetch_infostock_descriptions(date_str: str | None = None) -> dict[str, str]:
+    """하위 호환: 설명만 반환."""
+    _, descs = fetch_infostock_data(date_str)
+    return descs
+
+
+# ── 4. 점수 산출 ──────────────────────────────────────────────────────────────
 
 def score_leader(stock: dict) -> float:
-    """
-    대장주 점수 (등락률 기반):
-      - 등락률: 기본 점수 (등락률 값 그대로)
-      - 거래대금 순위 역수: max 30점
-      - 상한가 보너스: 도달 시 +20점, 09:30 이전 +10점 추가
-    """
-    score = 0.0
-
-    rate = stock.get("등락률", 0.0)
-    score += rate
+    score = stock.get("등락률", 0.0)
 
     rank_t = stock.get("거래대금_순위", 0)
     if rank_t and rank_t > 0:
@@ -420,7 +600,68 @@ def score_leader(stock: dict) -> float:
     return round(score, 2)
 
 
-# ── 6. 데이터 축적 ───────────────────────────────────────────────────────────
+# ── 5. 데이터 축적 ───────────────────────────────────────────────────────────
+
+def _match_theme_description(finup_name: str, infostock_descs: dict[str, str]) -> str | None:
+    """핀업 테마명에 대응하는 InfoStock 설명을 찾는다.
+    1) 정확히 일치 2) 부분 포함 3) 키워드 매칭 4) 설명 본문 검색
+    """
+    import re
+
+    # 1) 정확 매칭
+    if finup_name in infostock_descs:
+        return infostock_descs[finup_name]
+
+    # 2) 부분 포함 매칭
+    for is_name, desc in infostock_descs.items():
+        if finup_name in is_name or is_name in finup_name:
+            return desc
+
+    # 3) 핵심 키워드 매칭 (괄호/특수문자 제거 후)
+    fn_clean = re.sub(r"[(/)\s]", "", finup_name)
+    for is_name, desc in infostock_descs.items():
+        is_clean = re.sub(r"[(/)\s]", "", is_name)
+        if fn_clean in is_clean or is_clean in fn_clean:
+            return desc
+
+    # 4) 핀업 테마명의 핵심 단어가 InfoStock 테마명에 포함되는지 확인
+    keywords = re.split(r"[/()\s,]+", finup_name)
+    keywords = [k for k in keywords if len(k) >= 2]
+    if keywords:
+        best_match = None
+        best_score = 0
+        for is_name, desc in infostock_descs.items():
+            score = sum(1 for k in keywords if k in is_name)
+            if score > best_score:
+                best_score = score
+                best_match = desc
+        if best_score > 0:
+            return best_match
+
+    # 5) 설명 본문에서 핀업 테마명이 언급되는지 확인 (공백 무시)
+    fn_nospace = finup_name.replace(" ", "")
+    for is_name, desc in infostock_descs.items():
+        if finup_name in desc or fn_nospace in desc.replace(" ", ""):
+            return desc
+
+    return None
+
+
+def _apply_theme_descriptions(themes_master: dict, theme_map: dict,
+                              theme_descriptions: dict, date_str: str):
+    """themes_master에 InfoStock 설명을 매칭하여 저장."""
+    matched = 0
+    for theme in theme_map:
+        desc = _match_theme_description(theme, theme_descriptions)
+        if desc and theme in themes_master:
+            if "설명" not in themes_master[theme]:
+                themes_master[theme]["설명"] = {}
+            themes_master[theme]["설명"][date_str] = desc
+            matched += 1
+    if matched:
+        print(f"  InfoStock 설명 매칭: {matched}/{len(theme_map)}개 테마")
+
+
 
 def _load_json(path: str, default=None):
     if default is None:
@@ -438,9 +679,17 @@ def _save_json(path: str, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
+def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str,
+                    stock_reasons: dict = None, theme_descriptions: dict = None):
     """일별 데이터 저장 + stocks.json, themes.json 마스터 업데이트."""
+    if stock_reasons is None:
+        stock_reasons = {}
+    if theme_descriptions is None:
+        theme_descriptions = {}
     os.makedirs(DAILY_DIR, exist_ok=True)
+
+    # 테마명 정규화 (중복 테마 병합)
+    theme_map = normalize_theme_map(theme_map)
 
     # 종목별 테마 역매핑
     stock_themes: dict[str, list[str]] = {}
@@ -456,6 +705,9 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
         daily_data.append({
             "종목코드": s["종목코드"],
             "종목명": s["종목명"],
+            "시가": s.get("시가", 0),
+            "고가": s.get("고가", 0),
+            "종가": s.get("종가", 0),
             "등락률": s["등락률"],
             "거래대금_백만": s.get("거래대금_백만", 0),
             "시가총액_억": s.get("시가총액_억", 0),
@@ -463,6 +715,7 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
             "상한가시간": s.get("상한가시간", "-"),
             "대장주_점수": s.get("대장주_점수", 0),
             "테마": stock_themes.get(s["종목코드"], []),
+            "분류사유": stock_reasons.get(s["종목코드"], ""),
         })
 
     daily_path = os.path.join(DAILY_DIR, f"{date_str}.json")
@@ -483,19 +736,14 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
             }
         entry = stocks_master[code]
         entry["종목명"] = s["종목명"]
-        # 기존 리스트 형식 → 딕셔너리 마이그레이션
+        if "상승일" not in entry:
+            entry["상승일"] = {}
         if isinstance(entry.get("상승일"), list):
             entry["상승일"] = {d: 0.0 for d in entry["상승일"]}
-        # 테마 병합
         for t in stock_themes.get(code, []):
-            if t not in entry["테마"]:
+            if t not in entry.setdefault("테마", []):
                 entry["테마"].append(t)
-        # 상승일 + 등락률 추가
         entry["상승일"][date_str] = s.get("등락률", 0.0)
-        # 최근 90일만 유지
-        if len(entry["상승일"]) > 90:
-            sorted_dates = sorted(entry["상승일"].keys())
-            entry["상승일"] = {d: entry["상승일"][d] for d in sorted_dates[-90:]}
 
     _save_json(stocks_path, stocks_master)
     print(f"  종목 마스터: {stocks_path} ({len(stocks_master)}개)")
@@ -506,19 +754,17 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
 
     for theme, codes in theme_map.items():
         if theme not in themes_master:
-            themes_master[theme] = {
-                "종목": [],
-                "활성일": [],
-            }
+            themes_master[theme] = {"종목": [], "활성일": []}
         entry = themes_master[theme]
-        # 종목 병합
         for code in codes:
             if code not in entry["종목"]:
                 entry["종목"].append(code)
-        # 활성일 추가
         if date_str not in entry["활성일"]:
             entry["활성일"].append(date_str)
-            entry["활성일"] = entry["활성일"][-90:]
+
+    # InfoStock 테마 설명 매칭 (핀업 테마명 ↔ InfoStock 테마명 유사 매칭)
+    if theme_descriptions:
+        _apply_theme_descriptions(themes_master, theme_map, theme_descriptions, date_str)
 
     _save_json(themes_path, themes_master)
     print(f"  테마 마스터: {themes_path} ({len(themes_master)}개 테마)")
@@ -529,83 +775,57 @@ def accumulate_data(stocks: list[dict], theme_map: dict, date_str: str):
 # ── 메인 ──────────────────────────────────────────────────────────────────────
 
 def main():
-    app_key = os.environ.get("KIS_APP_KEY")
-    app_secret = os.environ.get("KIS_APP_SECRET")
+    app_key = os.environ.get("KIS_APP_KEY", "")
+    app_secret = os.environ.get("KIS_APP_SECRET", "")
     is_mock = os.environ.get("KIS_IS_MOCK", "false").lower() == "true"
     gemini_key = os.environ.get("GEMINI_API_KEY", "")
-
-    if not app_key or not app_secret:
-        print("오류: KIS_APP_KEY, KIS_APP_SECRET 환경변수를 설정하세요.")
-        return
 
     date_str = datetime.now().strftime("%Y-%m-%d")
 
     print(f"=== 대장주 분석 ({date_str}) ===\n")
 
-    # 1. 토큰
-    print("[1/6] 토큰 발급...")
-    access_token = get_or_refresh_token(app_key, app_secret, is_mock)
+    # ── 1. 주가 데이터 수집 (필수) ──
+    print("[1/4] FinanceDataReader 주가 수집...")
+    codes_info = fetch_rising_stocks()
 
-    # 2. 등락률 순위
-    print("[2/6] 등락률 순위 조회 (상위 50)...")
-    fluct = fetch_fluctuation_top(access_token, app_key, app_secret, is_mock)
-
-    if not fluct:
+    if not codes_info:
         print("조건을 만족하는 종목이 없습니다. (공휴일/장 미개장)")
         return
 
-    codes_info = []
-    for row in fluct:
-        code = str(row.get("stck_shrn_iscd", "")).strip()
-        if code and len(code) >= 5:
-            codes_info.append({
-                "종목코드": code,
-                "종목명": str(row.get("hts_kor_isnm", "")).strip(),
-                "등락률": row["_rate"],
-            })
     print(f"    -> {len(codes_info)}개 종목 선정")
 
-    # 3. 종목별 상세 시세
-    print(f"[3/6] 종목별 시세 조회...")
-    for item in codes_info:
-        detail = fetch_stock_detail(access_token, app_key, app_secret, item["종목코드"], is_mock)
-        item.update(detail)
-        time.sleep(0.1)
-
-    # 4. 상한가 종목 분봉 스캔
-    upper_candidates = [
-        s for s in codes_info
-        if s.get("현재가") and s.get("상한가") and s["현재가"] == s["상한가"]
-    ]
-    print(f"[4/6] 상한가 종목 도달시간 조회 ({len(upper_candidates)}개)...")
-    for s in upper_candidates:
-        hit_time = fetch_upper_limit_time(
-            access_token, app_key, app_secret,
-            s["종목코드"], s["상한가"], is_mock,
-        )
-        s["상한가시간"] = hit_time
-        print(f"    {s['종목코드']} {s['종목명']} -> {hit_time}")
-        time.sleep(0.1)
-
-    for s in codes_info:
-        if "상한가시간" not in s:
-            s["상한가시간"] = "-"
-
-    # 5. Gemini 테마 분류
-    theme_map = {}
-    if gemini_key:
-        print("[5/6] Gemini 테마 분류...")
+    # ── 2. 상한가 도달시간 (선택 - KIS API) ──
+    upper_count = sum(1 for s in codes_info if s.get("_is_upper"))
+    print(f"[2/4] 상한가 도달시간 조회 ({upper_count}개)...")
+    if upper_count > 0 and app_key and app_secret:
         try:
-            theme_map = classify_themes(codes_info, gemini_key)
-            for theme, codes in theme_map.items():
-                print(f"    {theme}: {len(codes)}개")
+            enrich_upper_limit_times(codes_info, app_key, app_secret, is_mock)
         except Exception as e:
-            print(f"    테마 분류 실패 (계속 진행): {e}")
-    else:
-        print("[5/6] GEMINI_API_KEY 미설정 - 테마 분류 생략")
+            print(f"    KIS API 실패 (계속 진행): {e}")
+    elif upper_count > 0:
+        print("    KIS_APP_KEY 미설정 - 도달시간 생략")
 
-    # 6. 점수 산출 & 정렬
-    print("[6/6] 점수 산출...")
+    # ── 3. 핀업 테마 분류 (메인) ──
+    theme_map = {}
+    stock_reasons = {}
+    print(f"[3/5] 핀업 테마 분류 ({len(codes_info)}개 종목)...")
+    try:
+        theme_map, stock_reasons = classify_themes_finup(codes_info)
+        print(f"    -> {len(theme_map)}개 테마, {len(stock_reasons)}개 종목 매칭")
+    except Exception as e:
+        print(f"    핀업 테마 분류 실패 (계속 진행): {e}")
+
+    # ── 4. InfoStock 테마 설명 (참조) ──
+    theme_descriptions = {}
+    print("[4/5] InfoStock 테마 설명 수집...")
+    try:
+        theme_descriptions = fetch_infostock_descriptions()
+        print(f"    -> {len(theme_descriptions)}개 테마 설명 수집")
+    except Exception as e:
+        print(f"    InfoStock 수집 실패 (계속 진행): {e}")
+
+    # ── 5. 점수 산출 & 저장 ──
+    print("[5/5] 점수 산출...")
 
     sorted_by_vol = sorted(codes_info, key=lambda x: x.get("거래대금_백만", 0), reverse=True)
     for i, s in enumerate(sorted_by_vol, 1):
@@ -616,15 +836,21 @@ def main():
 
     codes_info.sort(key=lambda x: x["대장주_점수"], reverse=True)
 
+    # 내부 필드 제거
+    for s in codes_info:
+        s.pop("_is_upper", None)
+        s.pop("_close", None)
+        s.pop("거래대금_순위", None)
+
     # 결과 출력
     print(f"\n>> 대장주 {len(codes_info)}건 분석 완료")
     for s in codes_info[:10]:
-        upper = " [상한가]" if s["상한가시간"] != "-" else ""
+        upper = f" [{s['상한가시간']}]" if s["상한가시간"] != "-" else ""
         print(f"  {s['종목코드']} {s['종목명']:<12s} {s['등락률']:>+7.2f}%{upper}  점수:{s['대장주_점수']:.1f}")
 
     # 데이터 축적
     print("\n>> 데이터 축적 중...")
-    daily_path = accumulate_data(codes_info, theme_map, date_str)
+    accumulate_data(codes_info, theme_map, date_str, stock_reasons, theme_descriptions)
 
 
 if __name__ == "__main__":

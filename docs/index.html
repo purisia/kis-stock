@@ -49,6 +49,30 @@ tr:hover { background: #1c2128; }
 .heatmap-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
 .heatmap-pct { font-weight: 700; }
 .heatmap-vol { font-size: 0.65rem; opacity: 0.8; }
+
+/* 모바일 카드 레이아웃 */
+.m-cards { display: none; }
+.m-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 12px; margin-bottom: 8px; }
+.m-card-row1 { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.m-card-name { font-size: 0.9rem; color: #58a6ff; font-weight: 600; }
+.m-card-rate { font-size: 0.95rem; font-weight: 700; }
+.m-card-row2 { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; font-size: 0.75rem; color: #8b949e; }
+.m-card-row2 span { white-space: nowrap; }
+.m-card-price { color: #c9d1d9; }
+.m-card-themes { margin-top: 6px; }
+.m-card-rank { color: #8b949e; font-size: 0.75rem; margin-right: 4px; }
+
+/* 데스크톱 테이블 */
+.d-table { display: block; }
+
+@media (max-width: 768px) {
+  .d-table { display: none; }
+  .m-cards { display: block; }
+  .summary { gap: 8px; }
+  .stat { padding: 8px 12px; flex: 1; min-width: 80px; }
+  .stat-value { font-size: 1.2rem; }
+  .container { padding: 8px; }
+}
 </style>
 </head>
 <body>
@@ -57,6 +81,7 @@ tr:hover { background: #1c2128; }
 
   <div class="tabs">
     <div class="tab active" data-view="daily">일별 현황</div>
+    <div class="tab" data-view="dailyThemes">일별 테마</div>
     <div class="tab" data-view="themes">테마별</div>
     <div class="tab" data-view="stocks">종목별</div>
   </div>
@@ -68,6 +93,15 @@ tr:hover { background: #1c2128; }
     </div>
     <div id="dailySummary" class="summary"></div>
     <div id="dailyTable"></div>
+  </div>
+
+  <!-- 일별 테마 -->
+  <div id="dailyThemes" class="view">
+    <div style="margin-bottom:12px">
+      <select id="dtDateSelect" class="date-select"></select>
+    </div>
+    <div id="dtSummary" class="summary"></div>
+    <div id="dtContent"></div>
   </div>
 
   <!-- 테마별 -->
@@ -85,15 +119,18 @@ tr:hover { background: #1c2128; }
 </div>
 
 <script>
-const BASE = '.';  // GitHub Pages: data/ is copied into the same directory
+const BASE = '.';
 
 function alphaLink(code) {
-  return `<a class="alpha-btn" href="https://m.alphasquare.co.kr/home/indicator-analysis?code=${code}" target="_blank" rel="noopener" onclick="event.stopPropagation()">&#945;</a>`;
+  return `<a class="alpha-btn" href="https://alphasquare.co.kr/home/stock-information?code=${code}" target="_blank" rel="noopener" onclick="event.stopPropagation()">&#945;</a>`;
 }
+
+function fmtPrice(v) { return (v || 0).toLocaleString(); }
 
 let themesData = {};
 let stocksData = {};
 let dailyCache = {};
+let navLock = false; // popstate 처리 중 중복 pushState 방지
 
 async function fetchJson(url) {
   const resp = await fetch(url);
@@ -101,11 +138,51 @@ async function fetchJson(url) {
   return resp.json();
 }
 
+// ── History API ──
+function pushNav(state) {
+  if (!navLock) {
+    history.pushState(state, '');
+  }
+}
+
+function applyState(state) {
+  if (!state || state.page === 'daily') {
+    switchTab('daily');
+    backToThemeList(true);
+    backToStockList(true);
+  } else if (state.page === 'dailyThemes') {
+    switchTab('dailyThemes');
+  } else if (state.page === 'themes') {
+    switchTab('themes');
+    backToThemeList(true);
+  } else if (state.page === 'stocks') {
+    switchTab('stocks');
+    backToStockList(true);
+  } else if (state.page === 'themeDetail') {
+    showThemeDetail(state.theme, true);
+  } else if (state.page === 'stockDetail') {
+    showStockDetail(state.code, true);
+  }
+}
+
+window.addEventListener('popstate', (e) => {
+  navLock = true;
+  applyState(e.state);
+  navLock = false;
+});
+
+function switchTab(viewId) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  const tabEl = document.querySelector(`[data-view="${viewId}"]`);
+  if (tabEl) tabEl.classList.add('active');
+  document.getElementById(viewId)?.classList.add('active');
+}
+
 async function init() {
   themesData = await fetchJson(`${BASE}/data/themes.json`) || {};
   stocksData = await fetchJson(`${BASE}/data/stocks.json`) || {};
 
-  // 모든 날짜 수집 (상승일이 dict {날짜: 등락률} 또는 list 형태 대응)
   const allDates = new Set();
   Object.values(stocksData).forEach(s => {
     if (s.상승일) {
@@ -123,23 +200,38 @@ async function init() {
     select.appendChild(opt);
   });
 
+  // 일별 테마 날짜 셀렉트도 동일하게 채우기
+  const dtSelect = document.getElementById('dtDateSelect');
+  dates.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d; opt.textContent = d;
+    dtSelect.appendChild(opt);
+  });
+  dtSelect.addEventListener('change', () => loadDailyThemes(dtSelect.value));
+
   if (dates.length > 0) {
     loadDaily(dates[0]);
+    loadDailyThemes(dates[0]);
   }
 
   select.addEventListener('change', () => loadDaily(select.value));
   await renderThemeHeatmap();
   renderThemeList();
   renderStockList();
+
+  // 초기 상태 기록
+  history.replaceState({ page: 'daily' }, '');
 }
 
 // ── 탭 전환 ──
 document.querySelectorAll('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-    tab.classList.add('active');
-    document.getElementById(tab.dataset.view).classList.add('active');
+    const viewId = tab.dataset.view;
+    switchTab(viewId);
+    // 탭 전환 시 상세 닫기
+    if (viewId === 'themes') backToThemeList(true);
+    if (viewId === 'stocks') backToStockList(true);
+    pushNav({ page: viewId });
   });
 });
 
@@ -165,25 +257,150 @@ async function loadDaily(date) {
     <div class="stat"><div class="stat-value">${themeSet.size}</div><div class="stat-label">활성 테마</div></div>
   `;
 
-  let html = `<table>
-    <tr><th>#</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>`;
+  // 데스크톱 테이블
+  let tbl = `<div class="d-table"><table>
+    <tr><th>#</th><th>종목</th><th>시가</th><th>고가</th><th>종가</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>`;
   data.forEach((s, i) => {
     const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
     const themes = (s.테마 || []).map(t =>
       `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
     ).join('');
-    html += `<tr>
+    tbl += `<tr>
       <td>${i+1}</td>
-      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${alphaLink(s.종목코드)}</td>
+      <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')" title="${(s.분류사유 || '').replace(/"/g, '&quot;')}">${s.종목명}</span>${alphaLink(s.종목코드)}</td>
+      <td>${fmtPrice(s.시가)}</td>
+      <td>${fmtPrice(s.고가)}</td>
+      <td>${fmtPrice(s.종가)}</td>
       <td class="positive">+${s.등락률.toFixed(2)}%</td>
-      <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
+      <td>${fmtPrice(s.거래대금_백만)}</td>
       <td>${upper}</td>
       <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
       <td>${themes}</td>
     </tr>`;
   });
-  html += '</table>';
-  document.getElementById('dailyTable').innerHTML = html;
+  tbl += '</table></div>';
+
+  // 모바일 카드
+  let cards = '<div class="m-cards">';
+  data.forEach((s, i) => {
+    const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '';
+    const themes = (s.테마 || []).map(t =>
+      `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+    ).join('');
+    cards += `<div class="m-card" onclick="showStockDetail('${s.종목코드}')">
+      <div class="m-card-row1">
+        <div><span class="m-card-rank">${i+1}</span><span class="m-card-name">${s.종목명}</span>${alphaLink(s.종목코드)}${upper}</div>
+        <div class="m-card-rate positive">+${s.등락률.toFixed(2)}%</div>
+      </div>
+      <div class="m-card-row2">
+        <span class="m-card-price">시${fmtPrice(s.시가)}</span>
+        <span class="m-card-price">고${fmtPrice(s.고가)}</span>
+        <span class="m-card-price">종${fmtPrice(s.종가)}</span>
+        <span>거래대금 ${fmtPrice(s.거래대금_백만)}백만</span>
+        <span>점수 ${(s.대장주_점수 || 0).toFixed(1)}</span>
+      </div>
+      ${themes ? `<div class="m-card-themes">${themes}</div>` : ''}
+    </div>`;
+  });
+  cards += '</div>';
+
+  document.getElementById('dailyTable').innerHTML = tbl + cards;
+}
+
+// ── 일별 테마 ──
+async function loadDailyThemes(date) {
+  if (!dailyCache[date]) {
+    dailyCache[date] = await fetchJson(`${BASE}/data/daily/${date}.json`);
+  }
+  const data = dailyCache[date];
+  if (!data) {
+    document.getElementById('dtContent').innerHTML = '<div class="loading">데이터 없음</div>';
+    document.getElementById('dtSummary').innerHTML = '';
+    return;
+  }
+
+  // 테마별로 종목 그룹핑
+  const themeGroups = {};
+  data.forEach(s => {
+    const themes = s.테마 && s.테마.length > 0 ? s.테마 : ['미분류'];
+    themes.forEach(t => {
+      if (!themeGroups[t]) themeGroups[t] = [];
+      themeGroups[t].push(s);
+    });
+  });
+
+  // 테마별 총 거래대금 기준 정렬 (영향력 순)
+  const sorted = Object.entries(themeGroups).sort((a, b) => {
+    const aSum = a[1].reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    const bSum = b[1].reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    return bSum - aSum;
+  });
+
+  const themeCount = Object.keys(themeGroups).length;
+  const upperCount = data.filter(s => s.상한가시간 !== '-').length;
+  document.getElementById('dtSummary').innerHTML = `
+    <div class="stat"><div class="stat-value">${themeCount}</div><div class="stat-label">활성 테마</div></div>
+    <div class="stat"><div class="stat-value">${data.length}</div><div class="stat-label">종목</div></div>
+    <div class="stat"><div class="stat-value positive">${upperCount}</div><div class="stat-label">상한가</div></div>
+  `;
+
+  let html = '';
+  sorted.forEach(([theme, stocks]) => {
+    const totalAmt = stocks.reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    const upperInTheme = stocks.filter(s => s.상한가시간 !== '-').length;
+    const avgRate = (stocks.reduce((s, x) => s + x.등락률, 0) / stocks.length).toFixed(1);
+
+    // 카드 헤더
+    html += `<div class="card">
+      <h2 onclick="showThemeDetail('${theme}')">${theme}</h2>
+      <div style="color:#8b949e;font-size:0.85rem;margin-bottom:8px">
+        종목 ${stocks.length}개 | 평균 +${avgRate}% | 거래대금 ${fmtPrice(totalAmt)}백만${upperInTheme > 0 ? ` | <span class="positive">상한가 ${upperInTheme}</span>` : ''}
+      </div>`;
+
+    // 데스크톱 테이블
+    html += `<div class="d-table"><table>
+      <tr><th>종목</th><th>시가</th><th>고가</th><th>종가</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th></tr>`;
+    stocks.sort((a, b) => (b.대장주_점수 || 0) - (a.대장주_점수 || 0));
+    stocks.forEach((s, idx) => {
+      const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
+      const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
+      html += `<tr>
+        <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목명}</span>${leader}${alphaLink(s.종목코드)}</td>
+        <td>${fmtPrice(s.시가)}</td>
+        <td>${fmtPrice(s.고가)}</td>
+        <td>${fmtPrice(s.종가)}</td>
+        <td class="positive">+${s.등락률.toFixed(2)}%</td>
+        <td>${fmtPrice(s.거래대금_백만)}</td>
+        <td>${upper}</td>
+        <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
+      </tr>`;
+    });
+    html += '</table></div>';
+
+    // 모바일 카드
+    html += '<div class="m-cards">';
+    stocks.forEach((s, idx) => {
+      const upperM = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '';
+      const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
+      html += `<div class="m-card" onclick="showStockDetail('${s.종목코드}')">
+        <div class="m-card-row1">
+          <div><span class="m-card-name">${s.종목명}</span>${leader}${alphaLink(s.종목코드)}${upperM}</div>
+          <div class="m-card-rate positive">+${s.등락률.toFixed(2)}%</div>
+        </div>
+        <div class="m-card-row2">
+          <span class="m-card-price">시${fmtPrice(s.시가)}</span>
+          <span class="m-card-price">고${fmtPrice(s.고가)}</span>
+          <span class="m-card-price">종${fmtPrice(s.종가)}</span>
+          <span>거래대금 ${fmtPrice(s.거래대금_백만)}백만</span>
+        </div>
+      </div>`;
+    });
+    html += '</div>';
+
+    html += '</div>'; // card 닫기
+  });
+
+  document.getElementById('dtContent').innerHTML = html;
 }
 
 // ── 테마 히트맵 ──
@@ -291,24 +508,21 @@ function renderThemeList() {
 }
 
 // ── 테마 상세 ──
-async function showThemeDetail(theme) {
-  // 탭 전환
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelector('[data-view="themes"]').classList.add('active');
-  document.getElementById('themes').classList.add('active');
-
+async function showThemeDetail(theme, fromPopstate) {
+  switchTab('themes');
   document.getElementById('themeList').style.display = 'none';
   document.getElementById('themeHeatmap').style.display = 'none';
   const el = document.getElementById('themeDetail');
   el.style.display = 'block';
+
+  if (!fromPopstate) pushNav({ page: 'themeDetail', theme });
 
   const info = themesData[theme];
   if (!info) { el.innerHTML = '데이터 없음'; return; }
 
   const dates = (info.활성일 || []).slice().reverse();
 
-  let html = `<button class="back-btn" onclick="backToThemeList()">목록으로</button>`;
+  let html = `<button class="back-btn" onclick="history.back()">목록으로</button>`;
   html += `<div class="detail-panel">
     <h2 style="color:#58a6ff;margin-bottom:8px">${theme}</h2>
     <div style="color:#8b949e;font-size:0.85rem;margin-bottom:8px">
@@ -317,8 +531,9 @@ async function showThemeDetail(theme) {
     <div>${dates.map(d => `<span class="badge badge-date">${d}</span>`).join('')}</div>
   </div>`;
 
-  // 날짜별 종목 테이블
-  html += '<table><tr><th>날짜</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th></tr>';
+  // 데스크톱 테이블
+  let tbl = '<div class="d-table"><table><tr><th>날짜</th><th>종목</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th></tr>';
+  let cardHtml = '<div class="m-cards">';
 
   for (const date of dates.slice(0, 30)) {
     if (!dailyCache[date]) {
@@ -331,22 +546,37 @@ async function showThemeDetail(theme) {
 
     matched.forEach((s, idx) => {
       const upper = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '-';
+      const upperM = s.상한가시간 !== '-' ? `<span class="badge badge-upper">${s.상한가시간}</span>` : '';
       const leader = idx === 0 ? '<span class="leader-badge">대장</span>' : '';
-      html += `<tr>
+      tbl += `<tr>
         <td>${date}</td>
         <td><span class="stock-link" onclick="showStockDetail('${s.종목코드}')">${s.종목코드} ${s.종목명}</span>${leader}${alphaLink(s.종목코드)}</td>
         <td class="positive">+${s.등락률.toFixed(2)}%</td>
-        <td>${(s.거래대금_백만 || 0).toLocaleString()}</td>
+        <td>${fmtPrice(s.거래대금_백만)}</td>
         <td>${upper}</td>
         <td>${(s.대장주_점수 || 0).toFixed(1)}</td>
       </tr>`;
+      cardHtml += `<div class="m-card" onclick="showStockDetail('${s.종목코드}')">
+        <div class="m-card-row1">
+          <div><span class="m-card-name">${s.종목명}</span>${leader}${alphaLink(s.종목코드)}${upperM}</div>
+          <div class="m-card-rate positive">+${s.등락률.toFixed(2)}%</div>
+        </div>
+        <div class="m-card-row2">
+          <span>${date}</span>
+          <span>거래대금 ${fmtPrice(s.거래대금_백만)}백만</span>
+          <span>점수 ${(s.대장주_점수 || 0).toFixed(1)}</span>
+        </div>
+      </div>`;
     });
   }
-  html += '</table>';
+  tbl += '</table></div>';
+  cardHtml += '</div>';
+
+  html += tbl + cardHtml;
   el.innerHTML = html;
 }
 
-function backToThemeList() {
+function backToThemeList(silent) {
   document.getElementById('themeList').style.display = '';
   document.getElementById('themeHeatmap').style.display = '';
   document.getElementById('themeDetail').style.display = 'none';
@@ -369,35 +599,47 @@ function renderStockList() {
     return bLast.localeCompare(aLast);
   });
 
-  let html = `<table><tr><th>종목코드</th><th>종목명</th><th>테마</th><th>상승일수</th><th>최근</th></tr>`;
+  // 데스크톱
+  let tbl = `<div class="d-table"><table><tr><th>종목코드</th><th>종목명</th><th>테마</th><th>상승일수</th><th>최근</th></tr>`;
+  let cards = '<div class="m-cards">';
   sorted.forEach(([code, info]) => {
     const themes = (info.테마 || []).map(t =>
-      `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
+      `<span class="badge badge-theme" onclick="event.stopPropagation();showThemeDetail('${t}')">${t}</span>`
     ).join('');
     const dates = getDates(info);
     const lastDate = dates.length ? dates[dates.length - 1] : '-';
-    html += `<tr>
+    tbl += `<tr>
       <td><span class="stock-link" onclick="showStockDetail('${code}')">${code}</span>${alphaLink(code)}</td>
       <td><span class="stock-link" onclick="showStockDetail('${code}')">${info.종목명}</span></td>
       <td>${themes}</td>
       <td>${dates.length}</td>
       <td>${lastDate}</td>
     </tr>`;
+    cards += `<div class="m-card" onclick="showStockDetail('${code}')">
+      <div class="m-card-row1">
+        <div><span class="m-card-name">${info.종목명}</span>${alphaLink(code)}</div>
+        <div style="color:#8b949e;font-size:0.8rem">${dates.length}일</div>
+      </div>
+      <div class="m-card-row2">
+        <span>${code}</span>
+        <span>최근 ${lastDate}</span>
+      </div>
+      ${themes ? `<div class="m-card-themes">${themes}</div>` : ''}
+    </div>`;
   });
-  html += '</table>';
-  el.innerHTML = html || '<div class="loading">종목 데이터 없음</div>';
+  tbl += '</table></div>';
+  cards += '</div>';
+  el.innerHTML = (tbl + cards) || '<div class="loading">종목 데이터 없음</div>';
 }
 
 // ── 종목 상세 ──
-async function showStockDetail(code) {
-  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-  document.querySelector('[data-view="stocks"]').classList.add('active');
-  document.getElementById('stocks').classList.add('active');
-
+async function showStockDetail(code, fromPopstate) {
+  switchTab('stocks');
   document.getElementById('stockList').style.display = 'none';
   const el = document.getElementById('stockDetail');
   el.style.display = 'block';
+
+  if (!fromPopstate) pushNav({ page: 'stockDetail', code });
 
   const info = stocksData[code];
   if (!info) { el.innerHTML = '데이터 없음'; return; }
@@ -408,14 +650,16 @@ async function showStockDetail(code) {
     `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
   ).join('');
 
-  let html = `<button class="back-btn" onclick="backToStockList()">목록으로</button>`;
+  let html = `<button class="back-btn" onclick="history.back()">목록으로</button>`;
   html += `<div class="detail-panel">
     <h2 style="color:#58a6ff;margin-bottom:8px">${code} ${info.종목명} ${alphaLink(code)}</h2>
     <div style="margin-bottom:8px">${themes}</div>
     <div style="color:#8b949e;font-size:0.85rem">상승 ${dates.length}일</div>
   </div>`;
 
-  html += '<table><tr><th>날짜</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th></tr>';
+  // 데스크톱
+  let tbl = '<div class="d-table"><table><tr><th>날짜</th><th>시가</th><th>고가</th><th>종가</th><th>등락률</th><th>거래대금(백만)</th><th>상한가</th><th>점수</th><th>테마</th><th>분류사유</th></tr>';
+  let cards = '<div class="m-cards">';
 
   for (const date of dates.slice(0, 30)) {
     if (!dailyCache[date]) {
@@ -426,24 +670,47 @@ async function showStockDetail(code) {
     if (!entry) continue;
 
     const upper = entry.상한가시간 !== '-' ? `<span class="badge badge-upper">${entry.상한가시간}</span>` : '-';
+    const upperM = entry.상한가시간 !== '-' ? `<span class="badge badge-upper">${entry.상한가시간}</span>` : '';
     const dayThemes = (entry.테마 || []).map(t =>
       `<span class="badge badge-theme" onclick="showThemeDetail('${t}')">${t}</span>`
     ).join('');
 
-    html += `<tr>
+    tbl += `<tr>
       <td>${date}</td>
+      <td>${fmtPrice(entry.시가)}</td>
+      <td>${fmtPrice(entry.고가)}</td>
+      <td>${fmtPrice(entry.종가)}</td>
       <td class="positive">+${entry.등락률.toFixed(2)}%</td>
-      <td>${(entry.거래대금_백만 || 0).toLocaleString()}</td>
+      <td>${fmtPrice(entry.거래대금_백만)}</td>
       <td>${upper}</td>
       <td>${(entry.대장주_점수 || 0).toFixed(1)}</td>
       <td>${dayThemes}</td>
+      <td style="font-size:0.75rem;color:#8b949e;max-width:300px">${entry.분류사유 || ''}</td>
     </tr>`;
+    cards += `<div class="m-card">
+      <div class="m-card-row1">
+        <div><span style="color:#8b949e;font-size:0.8rem">${date}</span>${upperM}</div>
+        <div class="m-card-rate positive">+${entry.등락률.toFixed(2)}%</div>
+      </div>
+      <div class="m-card-row2">
+        <span class="m-card-price">시${fmtPrice(entry.시가)}</span>
+        <span class="m-card-price">고${fmtPrice(entry.고가)}</span>
+        <span class="m-card-price">종${fmtPrice(entry.종가)}</span>
+        <span>거래대금 ${fmtPrice(entry.거래대금_백만)}백만</span>
+        <span>점수 ${(entry.대장주_점수 || 0).toFixed(1)}</span>
+      </div>
+      ${dayThemes ? `<div class="m-card-themes">${dayThemes}</div>` : ''}
+      ${entry.분류사유 ? `<div style="font-size:0.7rem;color:#8b949e;margin-top:4px">${entry.분류사유}</div>` : ''}
+    </div>`;
   }
-  html += '</table>';
+  tbl += '</table></div>';
+  cards += '</div>';
+
+  html += tbl + cards;
   el.innerHTML = html;
 }
 
-function backToStockList() {
+function backToStockList(silent) {
   document.getElementById('stockList').style.display = '';
   document.getElementById('stockDetail').style.display = 'none';
 }
