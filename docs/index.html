@@ -100,6 +100,7 @@ tr:hover { background: #1c2128; }
     <div style="margin-bottom:12px">
       <select id="dtDateSelect" class="date-select"></select>
     </div>
+    <div id="dtHeatmap" class="heatmap"></div>
     <div id="dtSummary" class="summary"></div>
     <div id="dtContent"></div>
   </div>
@@ -307,6 +308,56 @@ async function loadDaily(date) {
   document.getElementById('dailyTable').innerHTML = tbl + cards;
 }
 
+// ── 일별 테마 히트맵 ──
+function renderDailyHeatmap(sorted) {
+  const el = document.getElementById('dtHeatmap');
+  if (sorted.length === 0) { el.innerHTML = ''; return; }
+
+  // sorted: [[theme, stocks], ...] 이미 거래대금 내림차순
+  const stats = sorted.filter(([t]) => t !== '미분류').map(([theme, stocks]) => {
+    const vol = stocks.reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
+    const avgPct = stocks.reduce((s, x) => s + (x.등락률 || 0), 0) / stocks.length;
+    const upperCnt = stocks.filter(s => s.상한가시간 !== '-').length;
+    return { theme, vol, avgPct, upperCnt, count: stocks.length };
+  });
+
+  if (stats.length === 0) { el.innerHTML = ''; return; }
+  const maxVol = stats[0].vol;
+  const containerWidth = el.offsetWidth || 1160;
+  const totalArea = containerWidth * 280;
+
+  function heatColor(pct) {
+    if (pct < 0) return 'rgb(30,50,80)';
+    const clamped = Math.min(pct, 30);
+    const ratio = clamped / 30;
+    const r = Math.round(45 + ratio * 175);
+    const g = Math.round(30 - ratio * 12);
+    const b = Math.round(35 - ratio * 15);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  let html = '';
+  stats.forEach(s => {
+    const areaRatio = s.vol / maxVol;
+    const area = Math.max(totalArea * areaRatio * 0.3, 3200);
+    const w = Math.max(Math.sqrt(area * 1.6), 58);
+    const h = Math.max(area / w, 46);
+    const fontSize = Math.min(Math.max(w / 10, 9), 15);
+    const pctSize = Math.min(Math.max(w / 8, 11), 19);
+    const color = heatColor(s.avgPct);
+    const sign = s.avgPct >= 0 ? '+' : '';
+    const pctColor = s.avgPct >= 0 ? '#ff6b6b' : '#58a6ff';
+    const volText = s.vol >= 10000 ? (s.vol / 10000).toFixed(1) + '조' : s.vol >= 100 ? (s.vol / 100).toFixed(0) + '억' : s.vol + '백만';
+
+    html += `<div class="heatmap-box" style="width:${w.toFixed(0)}px;height:${h.toFixed(0)}px;background:${color}" onclick="showThemeDetail('${s.theme}')">
+      <span class="heatmap-name" style="font-size:${fontSize.toFixed(1)}px">${s.theme}</span>
+      <span class="heatmap-pct" style="font-size:${pctSize.toFixed(1)}px;color:${pctColor}">${sign}${s.avgPct.toFixed(1)}%</span>
+      <span class="heatmap-vol">${volText}</span>
+    </div>`;
+  });
+  el.innerHTML = html;
+}
+
 // ── 일별 테마 ──
 async function loadDailyThemes(date) {
   if (!dailyCache[date]) {
@@ -335,6 +386,9 @@ async function loadDailyThemes(date) {
     const bSum = b[1].reduce((s, x) => s + (x.거래대금_백만 || 0), 0);
     return bSum - aSum;
   });
+
+  // 일별 테마 히트맵
+  renderDailyHeatmap(sorted);
 
   const themeCount = Object.keys(themeGroups).length;
   const upperCount = data.filter(s => s.상한가시간 !== '-').length;
